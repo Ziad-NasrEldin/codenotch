@@ -21,6 +21,8 @@ final class NotchWindowController {
     var signInItems: [(title: String, action: () -> Void)] = []
     /// Refetch a single provider, asked for by clicking its ring.
     var onRefreshProvider: ((String) -> Void)?
+    /// Walk this ring to the next login. Double-click.
+    var onCycleProvider: ((String) -> Void)?
     /// Open the settings window, asked for by clicking the handle.
     var onOpenSettings: (() -> Void)?
 
@@ -31,6 +33,9 @@ final class NotchWindowController {
     private var clearHoverWork: DispatchWorkItem?
     private var clockTimer: Timer?
     private var cursorTimer: Timer?
+    /// Held so a single-click refresh can be cancelled by the double-click
+    /// that follows it. macOS delivers clickCount 1, then 2.
+    private var pendingRefresh: DispatchWorkItem?
 
     /// Hover in is quick; hover out waits, because the pointer has to cross the
     /// gap between the notch and the card without the card vanishing under it.
@@ -109,7 +114,7 @@ final class NotchWindowController {
             let panel = NotchPanel(contentRect: frame)
             let hosting = NotchHostingView(rootView: NotchRootView(model: model))
             panel.contextMenuProvider = { [weak self] in self?.contextMenu() }
-            panel.onClick = { [weak self] in self?.handleClick() }
+            panel.onClick = { [weak self] count in self?.handleClick(count: count) }
 
             // The hosting view goes *inside* a plain container rather than
             // being the content view itself.
@@ -217,7 +222,8 @@ final class NotchWindowController {
             sessionCount: model.activity(for: snapshot.id)?.sessions.count ?? 0,
             sessionCap: model.sessionCap,
             statusMessage: snapshot.statusMessage,
-            blockMessage: snapshot.block?.summary(now: model.now)
+            blockMessage: snapshot.block?.summary(now: model.now),
+            hasAccountLabel: snapshot.accountLabel != nil
         )
         // Across the stack the region is the card, its tail, and the gap the
         // pointer has to cross. Along it, the card's own extent.
@@ -388,9 +394,10 @@ final class NotchWindowController {
         }
     }
 
-    /// A click on a ring refetches that provider; a click anywhere else on the
-    /// open notch pins it. The ring is the more specific target, so it wins.
-    func handleClick() {
+    /// A click on a ring refetches that provider; a double-click walks to the
+    /// next login. A click anywhere else on the open notch pins it. The ring
+    /// is the more specific target, so it wins.
+    func handleClick(count: Int = 1) {
         guard let panel, model.isExpanded else {
             // Opens it, the same as the pointer arriving would — it must not
             // also pin it. The pill's hot zone is deliberately generous, since
@@ -409,13 +416,25 @@ final class NotchWindowController {
         // cells — otherwise the cell band nearest the foot of the stack swallows
         // it and clicking the gear refetches a provider instead.
         if isOverHandle(local) {
+            pendingRefresh?.cancel()
             onOpenSettings?()
             return
         }
         if notchRect.contains(local),
            let index = cellIndex(along: placement.along(of: local)),
            model.snapshots.indices.contains(index) {
-            onRefreshProvider?(model.snapshots[index].id)
+            let id = model.snapshots[index].id
+            pendingRefresh?.cancel()
+            if count >= 2 {
+                pendingRefresh = nil
+                onCycleProvider?(id)
+                return
+            }
+            let work = DispatchWorkItem { [weak self] in
+                self?.onRefreshProvider?(id)
+            }
+            pendingRefresh = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
             return
         }
         togglePinned()

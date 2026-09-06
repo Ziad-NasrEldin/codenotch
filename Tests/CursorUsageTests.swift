@@ -25,29 +25,53 @@ final class CursorUsageTests: XCTestCase {
 
     /// The bug this replaced: `used`/`limit` are both zero on a free plan even
     /// while real usage is happening, because the allowance arrives as
-    /// `breakdown.bonus`. Reading them reported 0% for an account 10% through
-    /// its month. `totalPercentUsed` is what the dashboard actually shows.
-    func testReadsThePercentageTheDashboardShows() throws {
+    /// `breakdown.bonus`. Reading them reported 0% for an account that was
+    /// spending Auto. `autoPercentUsed` is the Cursor-models pool the
+    /// dashboard now leads with.
+    func testReadsTheCursorModelsPool() throws {
         let w = try windows(recorded)
-        XCTAssertEqual(w[0].id, "included")
-        XCTAssertEqual(w[0].label, "Included usage")
-        XCTAssertEqual(w[0].usedFraction ?? -1, 0.095, accuracy: 0.0001)
-        XCTAssertEqual(w[0].summary, "10% Used · 90% left",
-                       "should round the way Cursor does, and show both ends")
+        XCTAssertEqual(w[0].id, "cursor_models")
+        XCTAssertEqual(w[0].label, "Cursor models")
+        XCTAssertEqual(w[0].usedFraction ?? -1, 0, accuracy: 0.0001)
+        XCTAssertEqual(w[0].summary, "0% Used · 100% left",
+                       "zero is a reading, and both ends are shown")
     }
 
     func testApiUsageIsReportedSeparately() throws {
         let w = try windows(recorded)
-        XCTAssertEqual(w.map(\.id), ["included", "api"])
+        XCTAssertEqual(w.map(\.id), ["cursor_models", "api"])
         XCTAssertEqual(w[1].usedFraction ?? -1, 0.19, accuracy: 0.0001)
+    }
+
+    /// A non-zero Auto reading is the ring, not a blend with API usage.
+    func testAUsedCursorModelsPoolIsTheHeadline() throws {
+        let json = """
+        {"individualUsage":{"plan":{"autoPercentUsed":19,"apiPercentUsed":4,
+                                    "totalPercentUsed":9.5}}}
+        """
+        let w = try windows(json)
+        XCTAssertEqual(w[0].id, "cursor_models")
+        XCTAssertEqual(w[0].usedFraction ?? -1, 0.19, accuracy: 0.0001)
+        XCTAssertEqual(w[0].summary, "19% Used · 81% left")
+    }
+
+    /// The blended included-usage headline is not a pool. Showing it as the
+    /// ring is what this change replaces.
+    func testIncludedUsageIsNotAWindow() throws {
+        let json = """
+        {"individualUsage":{"plan":{"autoPercentUsed":19,"apiPercentUsed":0,
+                                    "totalPercentUsed":94}}}
+        """
+        XCTAssertEqual(try windows(json).map(\.id), ["cursor_models"])
+        XCTAssertEqual(try windows(json)[0].usedFraction ?? -1, 0.19, accuracy: 0.0001)
     }
 
     /// It is only worth a row when it has actually been touched.
     func testZeroApiUsageIsOmitted() throws {
         let json = """
-        {"individualUsage":{"plan":{"totalPercentUsed":4,"apiPercentUsed":0}}}
+        {"individualUsage":{"plan":{"autoPercentUsed":4,"apiPercentUsed":0}}}
         """
-        XCTAssertEqual(try windows(json).map(\.id), ["included"])
+        XCTAssertEqual(try windows(json).map(\.id), ["cursor_models"])
     }
 
     /// The reset is Cursor's own `billingCycleEnd` — Sep 24 here, which is what
@@ -62,16 +86,16 @@ final class CursorUsageTests: XCTestCase {
 
     func testOnDemandOnlyCountsWhenSwitchedOnWithACeiling() throws {
         let on = """
-        {"individualUsage":{"plan":{"totalPercentUsed":5},
+        {"individualUsage":{"plan":{"autoPercentUsed":5},
                             "onDemand":{"enabled":true,"used":3,"limit":50}}}
         """
-        XCTAssertEqual(try windows(on).map(\.id), ["included", "on_demand"])
+        XCTAssertEqual(try windows(on).map(\.id), ["cursor_models", "on_demand"])
 
         let off = """
-        {"individualUsage":{"plan":{"totalPercentUsed":5},
+        {"individualUsage":{"plan":{"autoPercentUsed":5},
                             "onDemand":{"enabled":false,"used":0,"limit":null}}}
         """
-        XCTAssertEqual(try windows(off).map(\.id), ["included"])
+        XCTAssertEqual(try windows(off).map(\.id), ["cursor_models"])
     }
 
     func testNothingMeteredRatherThanAFalseZero() {
@@ -85,6 +109,26 @@ final class CursorUsageTests: XCTestCase {
 
     func testRejectsRubbish() {
         XCTAssertThrowsError(try windows("not json"))
+    }
+
+    func testPeriodUsageMapsTheSameTwoPools() throws {
+        let json = """
+        {"billingCycleEnd":"2026-09-24T03:32:15.933Z",
+         "planUsage":{"autoPercentUsed":22,"apiPercentUsed":8}}
+        """
+        let w = try CursorUsage.windows(fromPeriodJSON: json)
+        XCTAssertEqual(w.map(\.id), ["cursor_models", "api"])
+        XCTAssertEqual(w[0].usedFraction ?? -1, 0.22, accuracy: 0.0001)
+        XCTAssertEqual(w[1].usedFraction ?? -1, 0.08, accuracy: 0.0001)
+    }
+
+    func testAnyJSONPrefersTheSummaryEnvelope() throws {
+        let json = """
+        {"individualUsage":{"plan":{"autoPercentUsed":19,"apiPercentUsed":0}},
+         "planUsage":{"autoPercentUsed":99,"apiPercentUsed":50}}
+        """
+        let w = try CursorUsage.windows(fromAnyJSON: json)
+        XCTAssertEqual(w[0].usedFraction ?? -1, 0.19, accuracy: 0.0001)
     }
 }
 
@@ -108,8 +152,7 @@ final class CursorCredentialsTests: XCTestCase {
 
 /// Confirmed against a real account switched mid-cycle: Cursor reports 0% and
 /// means it. An earlier version suppressed this as "no allowance to be a
-/// percentage of", which hid a correct reading — Cursor's own response says
-/// "You've used 0% of your included total usage" in the same payload.
+/// percentage of", which hid a correct reading.
 final class CursorZeroUsageTests: XCTestCase {
     /// Verbatim from a live free account, just after signing into a new one.
     private let freePlan = """
@@ -123,13 +166,14 @@ final class CursorZeroUsageTests: XCTestCase {
 
     func testZeroPercentIsShownRatherThanSuppressed() throws {
         let windows = try CursorUsage.windows(fromJSON: freePlan)
-        XCTAssertEqual(windows.first?.id, "included")
+        XCTAssertEqual(windows.first?.id, "cursor_models")
+        XCTAssertEqual(windows.first?.label, "Cursor models")
         XCTAssertEqual(windows.first?.usedFraction, 0)
     }
 
     func testItStillReadsARealPercentage() throws {
-        let used = freePlan.replacingOccurrences(of: "\"totalPercentUsed\":0",
-                                                 with: "\"totalPercentUsed\":34")
+        let used = freePlan.replacingOccurrences(of: "\"autoPercentUsed\":0",
+                                                 with: "\"autoPercentUsed\":34")
         let windows = try CursorUsage.windows(fromJSON: used)
         XCTAssertEqual(windows.first?.usedFraction ?? 0, 0.34, accuracy: 0.0001)
     }

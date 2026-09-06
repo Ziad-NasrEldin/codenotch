@@ -14,27 +14,49 @@ actor CodexLocalProvider: UsageProvider {
     nonisolated let glyph = ProviderGlyph.openai
 
     private let stateStore: URL
+    nonisolated private let authURL: URL
+    nonisolated private let vault: AccountVault
+    private let session: URLSession
     /// Only the tail matters — the newest snapshot is at the end of the file.
     private let tailBytes = 256 * 1024
 
-    init(stateStore: URL = CodexStore.stateURL) {
+    init(stateStore: URL = CodexStore.stateURL,
+         authURL: URL = CodexCredentials.authURL,
+         vault: AccountVault = .shared,
+         session: URLSession = .shared) {
         self.stateStore = stateStore
+        self.authURL = authURL
+        self.vault = vault
+        self.session = session
     }
 
     nonisolated var signInRoute: SignInRoute { .openApp(bundleID: "com.openai.codex", name: "Codex") }
 
-    nonisolated func account() -> ProviderAccount? { CodexCredentials.account() }
+    nonisolated func liveAccount() -> ProviderAccount? { CodexCredentials.account(from: authURL) }
+
+    nonisolated func account() -> ProviderAccount? {
+        if let saved = vault.resolvedSaved(for: id, hasLive: liveAccount() != nil) {
+            return saved.asProviderAccount(
+                manageURL: URL(string: "https://chatgpt.com/#settings/Account")
+            )
+        }
+        return liveAccount()
+    }
 
     func fetchSnapshot() async throws -> ProviderSnapshot {
+        if let saved = vault.resolvedSaved(for: id, hasLive: liveAccount() != nil) {
+            return decorate(try await savedReading(saved), extra: true)
+        }
+
         // Codex itself first. The rollout below is a record of what was true
         // during the last turn; this is what is true now, and the two disagree
         // by however long it has been since Codex was used.
         if let live = await liveReading(), !live.windows.isEmpty {
-            return ProviderSnapshot(
+            return decorate(ProviderSnapshot(
                 id: id, displayName: displayName, glyph: glyph,
                 fidelity: .official, status: .ok, windows: live.windows,
                 headlineID: "primary", block: live.block
-            )
+            ), extra: false)
         }
 
         guard let rollout = CodexStore.newestRollout(in: stateStore) else {
@@ -43,7 +65,7 @@ actor CodexLocalProvider: UsageProvider {
         let text = try tail(of: rollout)
         let windows = try CodexUsage.windows(fromRollout: text)
 
-        return ProviderSnapshot(
+        return decorate(ProviderSnapshot(
             id: id,
             displayName: displayName,
             glyph: glyph,
@@ -51,7 +73,7 @@ actor CodexLocalProvider: UsageProvider {
             status: Self.status(recordedAt: CodexUsage.recordedAt(inRollout: text)),
             windows: windows,
             headlineID: "primary"
-        )
+        ), extra: false)
     }
 
     /// Ask Codex's app server for the live figure.
@@ -80,6 +102,67 @@ actor CodexLocalProvider: UsageProvider {
         let block = CodexBridge.block(in: answer)
         Log.usage.debug("codex: live reading, \(windows.count) window(s), blocked: \(block != nil)")
         return (windows, block)
+    }
+
+    /// WHAM for a Codenotch-held extra account. Must not fall back to the
+    /// rollout or the app server: those belong to the borrowed live login.
+    private func savedReading(_ account: SavedAccount) async throws -> ProviderSnapshot {
+        var current = account
+        do {
+            current = try await ChatGPTOAuth.fresh(current, session: session)
+        } catch {
+            if current.isExpired { throw UsageProviderError.credentialExpired }
+        }
+        if current != account { vault.update(current, provider: id) }
+
+        let (data, status) = try await wham(account: current)
+        if status == 401 || status == 403 {
+            let refreshed = try await ChatGPTOAuth.refresh(current, session: session)
+            vault.update(refreshed, provider: id)
+            let retry = try await wham(account: refreshed)
+            return try snapshot(fromWHAM: retry.data, status: retry.status, account: refreshed)
+        }
+        return try snapshot(fromWHAM: data, status: status, account: current)
+    }
+
+    private func snapshot(fromWHAM data: Data, status: Int,
+                          account: SavedAccount) throws -> ProviderSnapshot {
+        if status == 429 {
+            throw UsageProviderError.rateLimited(retryAfter: 60)
+        }
+        guard (200..<300).contains(status) else {
+            throw UsageProviderError.badResponse(status: status)
+        }
+        let windows = CodexUsage.windows(fromWHAM: data)
+        guard !windows.isEmpty else {
+            throw UsageProviderError.nothingMetered("Codex reported no usage windows")
+        }
+        let plan = CodexUsage.plan(fromWHAM: data)
+        let email = CodexUsage.email(fromWHAM: data)
+        if plan != nil || email != nil {
+            vault.update(account.updating(email: email, plan: plan), provider: id)
+        }
+        return ProviderSnapshot(
+            id: id, displayName: displayName, glyph: glyph,
+            fidelity: .official, status: .ok, windows: windows,
+            headlineID: "primary"
+        )
+    }
+
+    private func decorate(_ snapshot: ProviderSnapshot, extra: Bool) -> ProviderSnapshot {
+        snapshot.labeled(from: account(), showsActivity: !extra)
+    }
+
+    private func wham(account: SavedAccount) async throws -> (data: Data, status: Int) {
+        var request = URLRequest(url: ChatGPTOAuth.usageURL)
+        request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
+        if let id = account.vendorAccountId, !id.isEmpty {
+            request.setValue(id, forHTTPHeaderField: "ChatGPT-Account-Id")
+        }
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 15
+        let (data, response) = try await session.data(for: request)
+        return (data, (response as? HTTPURLResponse)?.statusCode ?? 0)
     }
 
     /// How long a rollout's own snapshot counts as current.

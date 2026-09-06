@@ -28,6 +28,30 @@ enum CodexCredentials {
         )
     }
 
+    static func email(inJWT token: String?) -> String? {
+        guard let token, let claims = claims(inJWT: token) else { return nil }
+        return nonempty((claims["email"] as? String)?.lowercased())
+    }
+
+    static func plan(inJWT token: String?) -> String? {
+        guard let token, let claims = claims(inJWT: token) else { return nil }
+        let auth = claims["https://api.openai.com/auth"] as? [String: Any]
+        return nonempty(auth?["chatgpt_plan_type"] as? String)
+    }
+
+    static func chatgptAccountId(inJWT token: String?) -> String? {
+        guard let token, let claims = claims(inJWT: token) else { return nil }
+        if let id = nonempty(claims["chatgpt_account_id"] as? String) { return id }
+        let auth = claims["https://api.openai.com/auth"] as? [String: Any]
+        return nonempty(auth?["chatgpt_account_id"] as? String)
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else { return nil }
+        return value
+    }
+
     /// The middle segment of a JWT, base64url-decoded. No verification: this is
     /// a label, not an authorisation.
     static func claims(inJWT token: String) -> [String: Any]? {

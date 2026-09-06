@@ -93,16 +93,21 @@ private struct TooltipShell<Content: View>: View {
     var body: some View {
         // Card first or tail first, laid out along whichever axis the tail
         // points. The pair is one silhouette either way.
-        switch direction {
-        case .leading:
-            HStack(spacing: 0) { card; tail }
-        case .trailing:
-            HStack(spacing: 0) { tail; card }
-        case .down:
-            VStack(spacing: 0) { tail; card }
-        case .up:
-            VStack(spacing: 0) { card; tail }
+        Group {
+            switch direction {
+            case .leading:
+                HStack(spacing: 0) { card; tail }
+            case .trailing:
+                HStack(spacing: 0) { tail; card }
+            case .down:
+                VStack(spacing: 0) { tail; card }
+            case .up:
+                VStack(spacing: 0) { card; tail }
+            }
         }
+        // Dark paints this clear. Light needs the offset: a white card on a
+        // pale desktop is the same colour as the wallpaper without it.
+        .shadow(color: Palette.cardLift, radius: 10, x: 0, y: 4)
     }
 }
 
@@ -288,6 +293,14 @@ private struct ProviderTooltip: View {
                     .foregroundStyle(Palette.textPrimary)
             }
 
+            if let label = snapshot.accountLabel {
+                Text(label)
+                    .font(Typography.cardBody)
+                    .foregroundStyle(Palette.textSecondary)
+                    .lineLimit(1)
+                    .padding(.top, NotchLayout.accountLabelGap)
+            }
+
             if let block = snapshot.block {
                 BlockedRow(text: block.summary(now: now))
                     .padding(.top, NotchLayout.headerToBlock)
@@ -326,7 +339,7 @@ private struct BlockedRow: View {
             Spacer(minLength: 0)
         }
         .font(Typography.cardBody)
-        .foregroundStyle(Palette.critical)
+        .foregroundStyle(Palette.criticalInk)
     }
 }
 
@@ -336,10 +349,20 @@ private struct SessionRow: View {
     let session: AgentSession
     let now: Date
 
-    private var stateColor: Color {
+    private var stateSignal: Color {
         switch session.state {
         case .busy:    return Palette.ample
         case .waiting: return Palette.watch
+        case .idle:    return Palette.textSecondary
+        }
+    }
+
+    /// Words on the card, as opposed to the ring beside them. Neon yellow is
+    /// a signal, not a typeface.
+    private var stateInk: Color {
+        switch session.state {
+        case .busy:    return Palette.ampleInk
+        case .waiting: return Palette.watchInk
         case .idle:    return Palette.textSecondary
         }
     }
@@ -363,8 +386,8 @@ private struct SessionRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             SplitRow(leading: session.name, trailing: stateWord,
-                     trailingColor: stateColor) {
-                StatusRing(state: session.state, color: stateColor)
+                     trailingColor: stateInk) {
+                StatusRing(state: session.state, color: stateSignal)
             }
             SplitRow(
                 leading: detail,
@@ -442,7 +465,8 @@ struct TooltipCard: View {
             sessionCount: activity?.sessions.count ?? 0,
             sessionCap: sessionCap,
             statusMessage: snapshot.statusMessage,
-            blockMessage: snapshot.block?.summary(now: now)
+            blockMessage: snapshot.block?.summary(now: now),
+            hasAccountLabel: snapshot.accountLabel != nil
         )
     }
 

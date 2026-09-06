@@ -22,7 +22,15 @@ struct ProviderRing: View {
     var isRefreshing: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @State private var spin: Double = 0
+
+    /// Dark sits a thin neon on a charcoal track that already blends into the
+    /// body. Light has no such blend, so the coloured arc has to carry more of
+    /// the ring or the track is what you see.
+    private var progressWidth: CGFloat {
+        colorScheme == .light ? NotchLayout.trackStroke * 0.72 : NotchLayout.progressStroke
+    }
 
     private var band: UsageBand {
         isBlocked ? .exhausted : UsageBand.band(for: usedFraction ?? 0)
@@ -44,7 +52,7 @@ struct ProviderRing: View {
                         .trim(from: 0, to: sweep)
                         .stroke(
                             band.color,
-                            style: StrokeStyle(lineWidth: NotchLayout.progressStroke, lineCap: .round)
+                            style: StrokeStyle(lineWidth: progressWidth, lineCap: .round)
                         )
                         // Refreshing spins the reading itself rather than
                         // overlaying a separate spinner: the thing being

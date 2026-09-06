@@ -137,6 +137,8 @@ enum NotchLayout {
     static let statusDotStroke = Design.px(3.4)
     static let statusDotGap    = Design.px(11)
     static let hairline      = Design.px(2.5)  // rule above the session list
+    /// Gap between the title and the quieter account line under it.
+    static let accountLabelGap = Design.px(4)
 
     /// The percent label's line box. Fixed rather than intrinsic so the panel
     /// geometry can be worked out in AppKit before SwiftUI lays anything out.
@@ -274,9 +276,14 @@ enum NotchLayout {
     static func cardHeight(windowCount: Int, sessionCount: Int = 0,
                            sessionCap: Int = defaultSessionCap,
                            statusMessage: String? = nil,
-                           blockMessage: String? = nil) -> CGFloat {
+                           blockMessage: String? = nil,
+                           hasAccountLabel: Bool = false) -> CGFloat {
         let header = max(glyphSize, cardTitleLineHeight)
         var height = 2 * cardPadding + header
+
+        if hasAccountLabel {
+            height += accountLabelGap + cardBodyLineHeight
+        }
 
         // The blocked line sits under the header, above everything else — it
         // is the reading that stops you working, so it leads.

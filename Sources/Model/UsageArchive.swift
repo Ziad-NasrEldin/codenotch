@@ -14,6 +14,33 @@ struct UsageArchive {
         let fidelity: Fidelity
         let windows: [LimitWindow]
         let fetchedAt: Date
+        let accountLabel: String?
+        let showsActivity: Bool?
+
+        init(id: String, displayName: String, glyph: ProviderGlyph, fidelity: Fidelity,
+             windows: [LimitWindow], fetchedAt: Date,
+             accountLabel: String? = nil, showsActivity: Bool? = nil) {
+            self.id = id
+            self.displayName = displayName
+            self.glyph = glyph
+            self.fidelity = fidelity
+            self.windows = windows
+            self.fetchedAt = fetchedAt
+            self.accountLabel = accountLabel
+            self.showsActivity = showsActivity
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(String.self, forKey: .id)
+            displayName = try container.decode(String.self, forKey: .displayName)
+            glyph = try container.decode(ProviderGlyph.self, forKey: .glyph)
+            fidelity = try container.decode(Fidelity.self, forKey: .fidelity)
+            windows = try container.decode([LimitWindow].self, forKey: .windows)
+            fetchedAt = try container.decode(Date.self, forKey: .fetchedAt)
+            accountLabel = try container.decodeIfPresent(String.self, forKey: .accountLabel)
+            showsActivity = try container.decodeIfPresent(Bool.self, forKey: .showsActivity)
+        }
     }
 
     private let defaults: UserDefaults
@@ -71,7 +98,9 @@ struct UsageArchive {
                 glyph: entry.glyph,
                 fidelity: entry.fidelity,
                 status: .stale(since: entry.fetchedAt),
-                windows: entry.windows
+                windows: entry.windows,
+                accountLabel: entry.accountLabel,
+                showsActivity: entry.showsActivity ?? true
             )
             result[entry.id] = (snapshot, entry.fetchedAt)
         }
@@ -86,7 +115,9 @@ struct UsageArchive {
                 glyph: $0.snapshot.glyph,
                 fidelity: $0.snapshot.fidelity,
                 windows: $0.snapshot.windows,
-                fetchedAt: $0.fetchedAt
+                fetchedAt: $0.fetchedAt,
+                accountLabel: $0.snapshot.accountLabel,
+                showsActivity: $0.snapshot.showsActivity
             )
         }
         guard let data = try? JSONEncoder().encode(entries) else { return }

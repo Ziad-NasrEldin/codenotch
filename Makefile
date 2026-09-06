@@ -3,26 +3,40 @@ export DEVELOPER_DIR := /Applications/Xcode.app/Contents/Developer
 PROJECT := Codenotch.xcodeproj
 SCHEME  := Codenotch
 DEST    := platform=macOS,arch=arm64
+# Local builds cannot use the upstream Developer ID. Apple Development keeps
+# Gatekeeper quiet enough to run from /Applications on this Mac.
+SIGN_ID ?= Apple Development
+TEAM    ?= 377QC32T9T
+SIGN    := CODE_SIGN_IDENTITY="$(SIGN_ID)" DEVELOPMENT_TEAM="$(TEAM)" CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES
 
-.PHONY: gen build test run clean
+.PHONY: gen build test run clean install
 
 gen:
 	xcodegen generate
 
 build: gen
 	xcodebuild -project $(PROJECT) -scheme $(SCHEME) -destination '$(DEST)' \
-		-configuration Debug build
+		-configuration Release $(SIGN) build
 
 test: gen
 	xcodebuild -project $(PROJECT) -scheme $(SCHEME) -destination '$(DEST)' \
-		-configuration Debug test
+		-configuration Debug $(SIGN) test
 
 run: build
 	@APP=$$(xcodebuild -project $(PROJECT) -scheme $(SCHEME) -destination '$(DEST)' \
-		-configuration Debug -showBuildSettings 2>/dev/null \
+		-configuration Release $(SIGN) -showBuildSettings 2>/dev/null \
 		| awk -F' = ' '/ BUILT_PRODUCTS_DIR/ {print $$2; exit}')/Codenotch.app; \
 	pkill -x Codenotch || true; \
 	open "$$APP"
+
+install: build
+	@APP=$$(xcodebuild -project $(PROJECT) -scheme $(SCHEME) -destination '$(DEST)' \
+		-configuration Release $(SIGN) -showBuildSettings 2>/dev/null \
+		| awk -F' = ' '/ BUILT_PRODUCTS_DIR/ {print $$2; exit}')/Codenotch.app; \
+	pkill -x Codenotch || true; \
+	rm -rf /Applications/Codenotch.app; \
+	ditto "$$APP" /Applications/Codenotch.app; \
+	open /Applications/Codenotch.app
 
 clean:
 	rm -rf build DerivedData $(PROJECT)

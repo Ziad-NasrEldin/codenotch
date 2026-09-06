@@ -980,6 +980,35 @@ it and then notice when the answer changes.
 - [x] Claude's guidance names `/login`, since Claude Code is a command with no
       app to open.
 
+### Extra Codex and Antigravity accounts
+
+The borrowed live slot is still the truth for "what is this Mac signed into".
+A second ChatGPT or Google login cannot live there — writing it into
+`~/.codex/auth.json` or Antigravity's keychain would steal the CLI's or
+editor's session. Extra logins are therefore *ours*: signed in here, stored
+in Codenotch's own keychain item, and used only to choose what the notch
+reads.
+
+- [x] `SavedAccount` / `AccountVault` — OpenCodex's roster shape: a stable id,
+      an email, a refreshable token, and which slot is active. Secrets in
+      `com.vinz.codenotch.accounts`; the active id in UserDefaults so switching
+      is a local choice.
+- [x] `ChatGPTOAuth` — the same public Codex client `codex login` uses, on
+      `http://localhost:1455/auth/callback`. PKCE, then WHAM
+      (`chatgpt.com/backend-api/wham/usage`) with `ChatGPT-Account-Id`. The
+      rollout and the app server belong to the live login and are never
+      consulted for a saved extra.
+- [x] `AntigravityOAuth` — Antigravity's public desktop client, on
+      `http://127.0.0.1:51121/callback`. The language server is the live
+      install's identity, so a saved extra talks only to Cloud Code with its
+      own token.
+- [x] Settings lists live + extras, with **Add account…** / **Remove**.
+      Switching never writes the other app's login. A busy loopback port is
+      reported as "already signing in", not as a generic failure.
+- [x] `AccountRosterTests` pins merge-by-identity, the live fallback, WHAM
+      window ids, form-encoding of `+` in refresh tokens, and the loopback
+      parser.
+
 ### Gemini, via Antigravity
 
 - [x] `ProviderGlyph.gemini` — the four-point spark, four unit-radius arcs each
@@ -1054,6 +1083,35 @@ it and then notice when the answer changes.
 - [x] It is a **count, never a percentage**, and the ring stays empty. A
       fraction needs a limit, no limit is published, and a denominator we made
       up would put a confident ring on a guess.
+
+### Grok Build
+
+- [x] `ProviderGlyph.grok` — xAI's mark, flattened from its own SVG (two
+      even-odd paths) rather than traced from the design frame, which predates
+      this provider. `testGrokIsTwoClosedLoopsInTheUnitBox` asserts it survived
+      flattening: two loops, inside the unit box, filling it.
+- [x] Credentials from **`~/.grok/auth.json`**, the file `grok login` writes.
+      Same borrow-don't-own shape as every other provider here. The access
+      token is refreshed in memory against `auth.x.ai` and never written back —
+      minting one into Grok's own file would race the CLI for a credential this
+      app does not own.
+- [x] `GrokProvider` — `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`,
+      the same call the Grok CLI itself makes, with `X-XAI-Token-Auth: xai-grok-cli`.
+      The headline is the weekly shared pool (`creditUsagePercent`); pay-as-you-go
+      is a second tooltip row only when a cap is actually set. A disabled cap is
+      not a meter. Accounts still on monthly billing report nothing metered
+      rather than a monthly percent wearing the weekly's place.
+- [x] The response is proto-JSON: an absent `creditUsagePercent` is a genuine
+      0%, a present non-numeric value is a schema change. Pinned by
+      `GrokUsageTests` against a live capture (2026-09-06, 67%, SuperGrok Heavy)
+      and an earlier OpenUsage capture.
+- [x] Apple's `ISO8601DateFormatter` rejects more than three fractional digits,
+      and Grok writes six (`2026-08-30T18:22:54.007137+00:00`). Truncating them
+      is what stops a live period from looking like a parser miss.
+- [x] `GrokActivityMonitor` — Grok publishes no status field, so recency of
+      `~/.grok/sessions/<workspace>/<id>/updates.jsonl` is the signal, the same
+      heuristic as Codex and Antigravity. Walks two directory levels rather than
+      recursing: a machine can hold more than a thousand session transcripts.
 
 ### Choosing how much the notch shows
 

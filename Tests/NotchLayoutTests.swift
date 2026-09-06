@@ -55,6 +55,16 @@ final class NotchLayoutTests: XCTestCase {
         )
     }
 
+    func testCardGrowsWithAnAccountLabel() {
+        let bare = NotchLayout.cardHeight(windowCount: 1)
+        let labeled = NotchLayout.cardHeight(windowCount: 1, hasAccountLabel: true)
+        XCTAssertEqual(
+            labeled - bare,
+            NotchLayout.accountLabelGap + NotchLayout.cardBodyLineHeight,
+            accuracy: 0.001
+        )
+    }
+
     /// The activity indicator lives in the gap between the glyph and the inside
     /// edge of the track, and must not touch either.
     func testActivityRingClearsTheGlyphAndTheTrack() {
@@ -572,7 +582,7 @@ final class ProviderGlyphTests: XCTestCase {
     }
 
     func testEveryGlyphResolvesAnOutline() {
-        for glyph in [ProviderGlyph.claude, .openai, .third, .cursor, .antigravity] {
+        for glyph in [ProviderGlyph.claude, .openai, .third, .cursor, .antigravity, .grok] {
             XCTAssertFalse(glyph.outline.isEmpty, "\(glyph) draws nothing")
         }
     }
@@ -580,6 +590,21 @@ final class ProviderGlyphTests: XCTestCase {
     /// The raw value is what archived readings were written under.
     func testTheRawValueSurvivesTheRename() {
         XCTAssertEqual(ProviderGlyph.antigravity.rawValue, "gemini")
+    }
+
+    func testGrokIsTwoClosedLoopsInTheUnitBox() {
+        XCTAssertEqual(GlyphOutline.grok.count, 2)
+        for (i, loop) in GlyphOutline.grok.enumerated() {
+            XCTAssertGreaterThan(loop.count, 50, "loop \(i) was not flattened into enough points")
+            for p in loop {
+                XCTAssertTrue((0...1).contains(p.x), "x outside the unit box: \(p.x)")
+                XCTAssertTrue((0...1).contains(p.y), "y outside the unit box: \(p.y)")
+            }
+        }
+        let xs = GlyphOutline.grok.flatMap { $0.map(\.x) }
+        let ys = GlyphOutline.grok.flatMap { $0.map(\.y) }
+        let span = max(xs.max()! - xs.min()!, ys.max()! - ys.min()!)
+        XCTAssertEqual(span, 1, accuracy: 0.01)
     }
 }
 
@@ -884,7 +909,8 @@ final class StatusMessageHeightTests: XCTestCase {
             ("ok", .ok)
         ]
         return [("claude", "Claude"), ("claude-work", "Claude (work)"), ("cursor", "Cursor"),
-                ("codex", "Codex"), ("gemini", "Antigravity")].flatMap { id, name in
+                ("codex", "Codex"), ("grok", "Grok"), ("glm", "GLM"),
+                ("gemini", "Antigravity")].flatMap { id, name in
             states.map { state in
                 ("\(id)/\(state.0)",
                  ProviderSnapshot(id: id, displayName: name, glyph: .claude,

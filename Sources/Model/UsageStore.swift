@@ -53,6 +53,7 @@ final class UsageStore: ObservableObject {
     private var lastAttempt: Date?
 
     private let archive: UsageArchive
+    private let vault: AccountVault
     private var lastGood: [String: (snapshot: ProviderSnapshot, fetchedAt: Date)] = [:]
     private var timer: Timer?
     private var refreshTask: Task<Void, Never>?
@@ -60,6 +61,9 @@ final class UsageStore: ObservableObject {
     /// never depends on when the task body happens to start.
     private var isRefreshing = false
     private var wakeObserver: NSObjectProtocol?
+    private var rosterObserver: NSObjectProtocol?
+    /// Provider ids whose browser login is in flight, so Settings can say so.
+    @Published private(set) var pendingLogins: Set<String> = []
 
     init(
         providers: [UsageProvider],
@@ -67,13 +71,15 @@ final class UsageStore: ObservableObject {
         idleRefreshInterval: TimeInterval = 5 * 60,
         staleAfter: TimeInterval = 15 * 60,
         archive: UsageArchive = UsageArchive(),
-        disconnected: Set<String> = []
+        disconnected: Set<String> = [],
+        vault: AccountVault = .shared
     ) {
         self.providers = providers
         self.refreshInterval = refreshInterval
         self.idleRefreshInterval = idleRefreshInterval
         self.staleAfter = staleAfter
         self.archive = archive
+        self.vault = vault
 
         // Open on what we knew last time rather than on an empty ring; the
         // first fetch will either confirm it or replace it.
@@ -97,7 +103,7 @@ final class UsageStore: ObservableObject {
         // preference reaches it, so an unfiltered first pass draws every
         // switched-off provider for as long as it takes the binding to arrive.
         snapshots = providers.filter { !disconnected.contains($0.id) }.map { provider in
-            guard let remembered = lastGood[provider.id] else { return Self.placeholder(provider) }
+            guard let remembered = lastGood[provider.id] else { return placeholder(provider) }
             var snapshot = remembered.snapshot
             snapshot.status = .stale(since: remembered.fetchedAt)
             return snapshot
@@ -107,10 +113,17 @@ final class UsageStore: ObservableObject {
     /// Enough to list the providers in settings without exposing them.
     var providerSummaries: [ProviderSummary] {
         providers.map { provider in
-            ProviderSummary(id: provider.id, name: provider.displayName,
-                            glyph: provider.glyph, account: provider.account(),
-                            signIn: provider.signInRoute,
-                            wasRefusedAccess: refusedAccess.contains(provider.id))
+            let live = provider.liveAccount()
+            return ProviderSummary(
+                id: provider.id,
+                name: provider.displayName,
+                glyph: provider.glyph,
+                account: provider.account(),
+                signIn: provider.signInRoute,
+                wasRefusedAccess: refusedAccess.contains(provider.id),
+                accounts: vault.entries(provider: provider.id, live: live, hasLive: live != nil),
+                canAddAccounts: vault.canAddAccounts(provider: provider.id)
+            )
         }
     }
 
@@ -129,6 +142,17 @@ final class UsageStore: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshNow() }
         }
+
+        rosterObserver = NotificationCenter.default.addObserver(
+            forName: .accountRosterDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                // Settings reads summaries from this object; a roster change
+                // is a change even before the next fetch lands.
+                self?.objectWillChange.send()
+                self?.refreshNow()
+            }
+        }
     }
 
     func stop() {
@@ -140,6 +164,10 @@ final class UsageStore: ObservableObject {
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
             self.wakeObserver = nil
+        }
+        if let rosterObserver {
+            NotificationCenter.default.removeObserver(rosterObserver)
+            self.rosterObserver = nil
         }
     }
 
@@ -254,7 +282,86 @@ final class UsageStore: ObservableObject {
             return true
         }
 
-        return openAccountSource(providerID: providerID)
+        if openAccountSource(providerID: providerID) { return true }
+        // No app to open, but extra logins are ours: start one.
+        guard vault.canAddAccounts(provider: providerID) else { return false }
+        addAccount(providerID: providerID)
+        return true
+    }
+
+    /// Browser OAuth for an extra Codenotch-held login.
+    func addAccount(providerID: String) {
+        guard vault.canAddAccounts(provider: providerID),
+              !pendingLogins.contains(providerID) else { return }
+        pendingLogins.insert(providerID)
+        Task { [weak self] in
+            var finished = false
+            defer {
+                if !finished {
+                    Task { @MainActor in self?.finishLogin(providerID) }
+                }
+            }
+            do {
+                let account = try await AccountLogin.add(provider: providerID)
+                guard let self else { return }
+                self.dropLastGood(providerID)
+                self.vault.upsert(account, provider: providerID)
+                self.replaceWithPlaceholder(providerID)
+                finished = true
+                self.finishLogin(providerID)
+            } catch {
+                await MainActor.run { AccountLogin.presentError(error, provider: providerID) }
+            }
+        }
+    }
+
+    func selectAccount(providerID: String, accountID: String) {
+        guard vault.activeID(for: providerID) != accountID else { return }
+        dropLastGood(providerID)
+        vault.setActive(provider: providerID, id: accountID)
+        replaceWithPlaceholder(providerID)
+    }
+
+    func removeAccount(providerID: String, accountID: String) {
+        let wasActive = vault.activeID(for: providerID) == accountID
+        if wasActive { dropLastGood(providerID) }
+        vault.remove(provider: providerID, id: accountID)
+        if wasActive { replaceWithPlaceholder(providerID) }
+    }
+
+    /// Next slot on this ring, or false when there is nothing to switch to.
+    @discardableResult
+    func cycleAccount(providerID: String) -> Bool {
+        guard let provider = providers.first(where: { $0.id == providerID }) else { return false }
+        let hasLive = provider.liveAccount() != nil
+        dropLastGood(providerID)
+        guard vault.cycle(provider: providerID, hasLive: hasLive) != nil else { return false }
+        replaceWithPlaceholder(providerID)
+        refresh(providerID: providerID)
+        return true
+    }
+
+    /// Drop the last reading so a switch cannot flash the previous account's %.
+    func forgetReading(_ providerID: String) {
+        dropLastGood(providerID)
+        replaceWithPlaceholder(providerID)
+    }
+
+    private func dropLastGood(_ providerID: String) {
+        lastGood.removeValue(forKey: providerID)
+        archive.forget(providerID)
+    }
+
+    private func replaceWithPlaceholder(_ providerID: String) {
+        if let index = snapshots.firstIndex(where: { $0.id == providerID }),
+           let provider = providers.first(where: { $0.id == providerID }) {
+            snapshots[index] = placeholder(provider)
+        }
+    }
+
+    private func finishLogin(_ providerID: String) {
+        pendingLogins.remove(providerID)
+        NotificationCenter.default.post(name: .accountLoginDidFinish, object: providerID)
     }
 
     /// Ask macOS for this provider's credential again.
@@ -336,13 +443,13 @@ final class UsageStore: ObservableObject {
         if Self.supersedesHistory(status) {
             lastGood[provider.id] = nil
             archive.save(lastGood)
-            var empty = Self.placeholder(provider)
+            var empty = placeholder(provider)
             empty.status = status
             return empty
         }
 
         guard let previous = lastGood[provider.id] else {
-            var empty = Self.placeholder(provider)
+            var empty = placeholder(provider)
             empty.status = status
             return empty
         }
@@ -401,14 +508,17 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    private static func placeholder(_ provider: UsageProvider) -> ProviderSnapshot {
-        ProviderSnapshot(
+    private func placeholder(_ provider: UsageProvider) -> ProviderSnapshot {
+        let extra = vault.resolvedSaved(for: provider.id, hasLive: provider.liveAccount() != nil) != nil
+        return ProviderSnapshot(
             id: provider.id,
             displayName: provider.displayName,
             glyph: provider.glyph,
             fidelity: .official,
             status: .stale(since: .distantPast),
-            windows: []
+            windows: [],
+            accountLabel: provider.account()?.summary,
+            showsActivity: !extra
         )
     }
 }

@@ -3,24 +3,29 @@ import Combine
 import Foundation
 import SQLite3
 
-/// Reads what Cursor's agents are doing from the editor's own state store.
+/// Reads what Cursor's agents are doing.
 ///
-/// Cursor publishes no session registry the way Claude Code does, but its
-/// `composerHeaders` rows carry the two facts that matter:
+/// Two sources, because "Cursor" is no longer one program:
 ///
-/// - `unfinishedRunAt` — set while a run is in flight, cleared when it finishes.
-/// - `hasBlockingPendingActions` / `hasPendingPlan` — set when it wants you.
+/// 1. **The editor's `composerHeaders`.** A run in flight sets `unfinishedRunAt`;
+///    a turn that wants you sets `hasBlockingPendingActions` / `hasPendingPlan`.
+///    Those flags are not cleared reliably, so a header only counts when the
+///    stamp is still recent and belongs to the editor now running.
+/// 2. **`~/.cursor/acp-sessions`.** T3 Code and `cursor-agent` record titled
+///    threads there, not in `state.vscdb`. A session whose `store.db` (or its
+///    WAL) was written moments ago is mid-turn. Untitled folders are probes
+///    and are ignored.
 ///
-/// The database is in **WAL mode**, so it must be opened without `immutable`:
-/// that flag tells SQLite to ignore the write-ahead log, which means reading
-/// whatever was true at the last checkpoint. It is the difference between a
-/// spinner that tracks the agent and one that lags minutes behind.
+/// The editor database is in **WAL mode**, so it must be opened without
+/// `immutable`: that flag tells SQLite to ignore the write-ahead log, which
+/// means reading whatever was true at the last checkpoint.
 @MainActor
 final class CursorActivityMonitor: ObservableObject, AgentActivityMonitor {
     @Published private(set) var sessions: [AgentSession] = []
     var sessionsPublisher: AnyPublisher<[AgentSession], Never> { $sessions.eraseToAnyPublisher() }
 
     private let store: URL
+    private let acpRoot: URL
     private let interval: TimeInterval
     /// How long a conversation may go without being written to before its run
     /// is treated as over.
@@ -37,9 +42,12 @@ final class CursorActivityMonitor: ObservableObject, AgentActivityMonitor {
     private var timer: Timer?
 
     init(store: URL = CursorCredentials.storeURL,
+         acpRoot: URL = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".cursor/acp-sessions"),
          interval: TimeInterval = 2,
          staleAfter: TimeInterval = 15 * 60) {
         self.store = store
+        self.acpRoot = acpRoot
         self.interval = interval
         self.staleAfter = staleAfter
     }
@@ -62,7 +70,8 @@ final class CursorActivityMonitor: ObservableObject, AgentActivityMonitor {
     }
 
     private func rescan() {
-        let found = Self.read(store: store, cursorLaunchedAt: Self.cursorLaunchDate(),
+        let found = Self.read(store: store, acpRoot: acpRoot,
+                              cursorLaunchedAt: Self.cursorLaunchDate(),
                               staleAfter: staleAfter)
         guard found != sessions else { return }
         sessions = found
@@ -97,8 +106,24 @@ final class CursorActivityMonitor: ObservableObject, AgentActivityMonitor {
         return launchDate ?? .distantPast
     }
 
+    static func read(store: URL, acpRoot: URL,
+                     cursorLaunchedAt: Date?,
+                     staleAfter: TimeInterval, now: Date = Date()) -> [AgentSession] {
+        (composerSessions(store: store, cursorLaunchedAt: cursorLaunchedAt,
+                          staleAfter: staleAfter, now: now)
+         + acpSessions(root: acpRoot, staleAfter: staleAfter, now: now))
+            .sorted { $0.since > $1.since }
+    }
+
+    /// Compatibility for tests that only exercise the editor store.
     static func read(store: URL, cursorLaunchedAt: Date?,
                      staleAfter: TimeInterval, now: Date = Date()) -> [AgentSession] {
+        composerSessions(store: store, cursorLaunchedAt: cursorLaunchedAt,
+                         staleAfter: staleAfter, now: now)
+    }
+
+    static func composerSessions(store: URL, cursorLaunchedAt: Date?,
+                                 staleAfter: TimeInterval, now: Date = Date()) -> [AgentSession] {
         guard let db = SQLiteStore.open(store) else { return [] }
         defer { sqlite3_close(db) }
 
@@ -188,8 +213,61 @@ final class CursorActivityMonitor: ObservableObject, AgentActivityMonitor {
         )
     }
 
+    /// Titled ACP threads whose store was written inside `staleAfter`.
+    /// Recency is the signal: the folder has no status field.
+    static func acpSessions(root: URL, staleAfter: TimeInterval, now: Date = Date()) -> [AgentSession] {
+        let manager = FileManager.default
+        guard let folders = try? manager.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        return folders.compactMap { folder in
+            guard (try? folder.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+            else { return nil }
+            let stamp = [mtime(folder.appendingPathComponent("store.db-wal")),
+                         mtime(folder.appendingPathComponent("store.db"))]
+                .compactMap { $0 }
+                .max()
+            guard let stamp, now.timeIntervalSince(stamp) <= staleAfter else { return nil }
+            guard let title = acpTitle(in: folder), !title.isEmpty else { return nil }
+            let cwd = acpCwd(in: folder)
+            return AgentSession(
+                id: "cursor.acp.\(folder.lastPathComponent)",
+                name: title,
+                detail: "Agent · \(cwd)",
+                state: .busy,
+                waitingFor: nil,
+                since: stamp
+            )
+        }
+    }
+
     /// Cursor writes its timestamps as milliseconds since the epoch.
     private static func date(_ value: Any?) -> Date? {
         (value as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) }
+    }
+
+    private static func mtime(_ url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    private static func acpMeta(in folder: URL) -> [String: Any]? {
+        let url = folder.appendingPathComponent("meta.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return json
+    }
+
+    private static func acpTitle(in folder: URL) -> String? {
+        acpMeta(in: folder)?["title"] as? String
+    }
+
+    /// Last path component of the session cwd, so the tooltip says `codenotch`
+    /// rather than the whole home-directory URL.
+    static func acpCwd(in folder: URL) -> String {
+        let raw = acpMeta(in: folder)?["cwd"] as? String ?? ""
+        let last = URL(fileURLWithPath: raw).lastPathComponent
+        return last.isEmpty ? "Agent" : last
     }
 }

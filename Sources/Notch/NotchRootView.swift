@@ -75,8 +75,21 @@ struct NotchRootView: View {
     }
 
     private func notch(_ place: NotchPlacement) -> some View {
-        SideNotchShape(edge: model.edge, joining: model.joinedNotch)
+        let shape = SideNotchShape(edge: model.edge, joining: model.joinedNotch)
+        return shape
             .fill(Palette.notch)
+            // Light only: a hairline so a white silhouette holds against a pale
+            // wallpaper. Dark paints this clear. Clipped with the body, then
+            // the bezel strip covers the edge that must stay welded.
+            .overlay { shape.stroke(Palette.notchRim, lineWidth: 1) }
+            .overlay(alignment: bezelAlignment) {
+                Rectangle()
+                    .fill(Palette.notch)
+                    .frame(
+                        width: model.edge.isVertical ? 3 : nil,
+                        height: model.edge.isVertical ? nil : 3
+                    )
+            }
             .frame(width: model.notchSize.width, height: model.notchSize.height)
             // Aligned to the corner where the stack starts *and* the bezel is,
             // then pushed clear of any hardware notch. Centring the contents in
@@ -89,7 +102,7 @@ struct NotchRootView: View {
             // the cells simply sit on top of a shrinking shape and appear to
             // slide out of the end of it; clipped, they are swallowed by the
             // outline as it closes, which is what a notch should do.
-            .clipShape(SideNotchShape(edge: model.edge, joining: model.joinedNotch))
+            .clipShape(shape)
             .position(place.point(
                 along: model.notchLeadingInset + model.notchLength / 2,
                 across: model.notchDepth / 2
@@ -161,6 +174,17 @@ struct NotchRootView: View {
         }
     }
 
+    /// The alignment a strip uses to paint over the rim on the bezel side,
+    /// so the hairline never reads as a gap between the notch and the screen.
+    private var bezelAlignment: Alignment {
+        switch model.edge {
+        case .right:  return .trailing
+        case .left:   return .leading
+        case .top:    return .top
+        case .bottom: return .bottom
+        }
+    }
+
     /// Distance from the start of the shape to the first cell, widening
     /// included so the readings stay in the middle of a bar that was stretched
     /// to cover the hardware notch.
@@ -193,7 +217,8 @@ struct NotchRootView: View {
                 sessionCount: model.activity(for: snapshot.id)?.sessions.count ?? 0,
                 sessionCap: model.sessionCap,
                 statusMessage: snapshot.statusMessage,
-                blockMessage: snapshot.block?.summary(now: model.now)
+                blockMessage: snapshot.block?.summary(now: model.now),
+                hasAccountLabel: snapshot.accountLabel != nil
             )
         return place.point(
             along: model.slack + model.ringCenter(index: index),

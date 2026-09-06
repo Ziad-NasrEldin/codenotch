@@ -281,3 +281,69 @@ final class CursorActivityTests: XCTestCase {
         return url
     }
 }
+
+@MainActor
+final class CursorACPActivityTests: XCTestCase {
+    private var root: URL!
+    private let now = Date(timeIntervalSince1970: 1_788_000_000)
+
+    override func setUpWithError() throws {
+        root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("acp-sessions-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    func testATitledSessionWrittenJustNowIsBusy() throws {
+        try writeSession(id: "5c750d6e", title: "Investigate Tasks",
+                         cwd: "/Users/ziad/Work/GitHub/codenotch", modified: now)
+        let sessions = CursorActivityMonitor.acpSessions(root: root, staleAfter: 60, now: now)
+        XCTAssertEqual(sessions.count, 1)
+        XCTAssertEqual(sessions.first?.id, "cursor.acp.5c750d6e")
+        XCTAssertEqual(sessions.first?.name, "Investigate Tasks")
+        XCTAssertEqual(sessions.first?.detail, "Agent · codenotch")
+        XCTAssertEqual(sessions.first?.state, .busy)
+    }
+
+    func testAnUntitledProbeIsIgnored() throws {
+        try writeSession(id: "df62487a", title: nil,
+                         cwd: "/Users/ziad", modified: now)
+        XCTAssertTrue(CursorActivityMonitor.acpSessions(root: root, staleAfter: 60, now: now).isEmpty)
+    }
+
+    func testAQuietSessionIsNotWorking() throws {
+        try writeSession(id: "old", title: "Speedflight Setup",
+                         cwd: "/Users/ziad/Work/GitHub",
+                         modified: now.addingTimeInterval(-600))
+        XCTAssertTrue(CursorActivityMonitor.acpSessions(root: root, staleAfter: 60, now: now).isEmpty)
+    }
+
+    func testTheBoundaryIsInclusive() throws {
+        try writeSession(id: "edge", title: "Still live",
+                         cwd: "/tmp/codenotch", modified: now.addingTimeInterval(-60))
+        XCTAssertEqual(
+            CursorActivityMonitor.acpSessions(root: root, staleAfter: 60, now: now).first?.name,
+            "Still live"
+        )
+    }
+
+    func testNoSessionsIsQuietRatherThanAnError() {
+        let absent = root.appendingPathComponent("nowhere")
+        XCTAssertTrue(CursorActivityMonitor.acpSessions(root: absent, staleAfter: 60, now: now).isEmpty)
+    }
+
+    private func writeSession(id: String, title: String?, cwd: String, modified: Date) throws {
+        let dir = root.appendingPathComponent(id)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var meta: [String: Any] = ["schemaVersion": 1, "cwd": cwd]
+        if let title { meta["title"] = title }
+        let data = try JSONSerialization.data(withJSONObject: meta)
+        try data.write(to: dir.appendingPathComponent("meta.json"))
+        let store = dir.appendingPathComponent("store.db")
+        try Data().write(to: store)
+        try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: store.path)
+    }
+}

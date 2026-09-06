@@ -112,6 +112,26 @@ enum ReleaseNotes {
                     title: "Long messages are no longer cut off",
                     detail: "A tooltip with something to explain reserved one "
                           + "line for it however much it said."
+                ),
+                ReleaseNote.Change(
+                    title: "Grok Build is a provider now",
+                    detail: "It reads the login grok login already wrote and "
+                          + "shows the same weekly pool the CLI itself reports."
+                ),
+                ReleaseNote.Change(
+                    title: "Light mode",
+                    detail: "Settings → Appearance → Theme. Dark stays the "
+                          + "default, so an update does not recolour a notch "
+                          + "that has always been black. Light is white, not "
+                          + "an invert; System follows the Mac."
+                ),
+                ReleaseNote.Change(
+                    title: "Extra accounts for every provider",
+                    detail: "Add another Claude, Cursor, ChatGPT, Google, or "
+                          + "Grok login from Settings. It stays in Codenotch "
+                          + "and never overwrites the borrowed login the "
+                          + "owning tool itself holds. Double-click a ring "
+                          + "to cycle."
                 )
             ]
         ),

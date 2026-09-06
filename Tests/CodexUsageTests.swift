@@ -84,6 +84,28 @@ final class CodexUsageTests: XCTestCase {
         let messy = "not json\n" + rollout + "\nhalf a line {"
         XCTAssertEqual(try CodexUsage.windows(fromRollout: messy, now: now).count, 1)
     }
+
+    /// Extra accounts have no rollout. WHAM is the same two windows under
+    /// different field names, so the ring's `primary` headline still holds.
+    func testWHAMUsesTheSameWindowIdsAsTheRollout() {
+        let body = """
+        {"email":"a@b.c","plan_type":"plus","rate_limit":{\
+        "primary_window":{"used_percent":12.5,"reset_at":1790585719,"limit_window_seconds":18000},\
+        "secondary_window":{"used_percent":40,"reset_at":1791000000,"limit_window_seconds":604800}}}
+        """
+        let w = CodexUsage.windows(fromWHAM: Data(body.utf8), now: now)
+        XCTAssertEqual(w.map(\.id), ["primary", "secondary"])
+        XCTAssertEqual(w[0].usedFraction ?? -1, 0.125, accuracy: 0.0001)
+        XCTAssertEqual(w[0].label, "5h limit")
+        XCTAssertEqual(w[1].label, "Weekly limit")
+        XCTAssertEqual(try XCTUnwrap(w[0].resetsAt).timeIntervalSince1970, 1_790_585_719, accuracy: 1)
+        XCTAssertEqual(CodexUsage.plan(fromWHAM: Data(body.utf8)), "plus")
+        XCTAssertEqual(CodexUsage.email(fromWHAM: Data(body.utf8)), "a@b.c")
+    }
+
+    func testAWHAMBodyWithoutWindowsIsEmptyRatherThanAGuess() {
+        XCTAssertTrue(CodexUsage.windows(fromWHAM: Data("{}".utf8)).isEmpty)
+    }
 }
 
 /// The activity signal is a heuristic — a rollout written moments ago — so what

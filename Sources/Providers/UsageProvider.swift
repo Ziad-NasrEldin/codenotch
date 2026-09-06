@@ -14,6 +14,12 @@ protocol UsageProvider {
     /// on the default and never on the implementation — which is exactly what
     /// happened, and it failed silently by reporting every account as absent.
     func account() -> ProviderAccount?
+    /// The borrowed login, ignoring extra accounts Codenotch holds.
+    ///
+    /// Settings needs both: the live row is this, the active reading is
+    /// `account()`. A requirement so calling it through `any UsageProvider`
+    /// does not collapse to the default — see the note on `account()`.
+    func liveAccount() -> ProviderAccount?
     /// Where the user goes to sign in, when there is no account to read. A
     /// requirement for the same reason `account()` is.
     var signInRoute: SignInRoute { get }

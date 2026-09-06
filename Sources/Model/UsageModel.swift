@@ -161,6 +161,7 @@ struct ProviderSnapshot: Identifiable, Equatable {
             return "Sign in to Claude Code in ~/.claude-\(slug) to read your usage"
         case "cursor":     return "Sign in to Cursor in the editor"
         case "codex":      return "Sign in to Codex to read your usage"
+        case "grok":       return "Sign in with Grok Build (`grok login`) to read your usage"
         case "gemini":     return "Sign in to Antigravity to read your usage"
         case "glm":        return "Set up a GLM Coding Plan key for a coding tool to read your usage"
         default:           return "Sign in to \(displayName) to read your usage"
@@ -181,5 +182,17 @@ struct ProviderSnapshot: Identifiable, Equatable {
         case .error(let why): return "Couldn't read usage — \(why)"
         case .stale, .ok:     return "Waiting for the first reading…"
         }
+    }
+
+    /// Whose numbers these are, when more than one login exists.
+    var accountLabel: String? = nil
+    /// Live-tool sessions stay on the borrowed slot. Extra accounts hide them.
+    var showsActivity: Bool = true
+
+    func labeled(from account: ProviderAccount?, showsActivity: Bool) -> ProviderSnapshot {
+        var copy = self
+        copy.accountLabel = account?.summary
+        copy.showsActivity = showsActivity
+        return copy
     }
 }

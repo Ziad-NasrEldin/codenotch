@@ -18,6 +18,9 @@ final class SettingsWindowController {
     private let signIn: (String) -> Bool
     private let switchAccount: (String) -> Bool
     private let retry: (String) -> Void
+    private let addAccount: (String) -> Void
+    private let selectAccount: (String, String) -> Void
+    private let removeAccount: (String, String) -> Void
     private let updater: Updater
 
     init(preferences: Preferences,
@@ -26,9 +29,15 @@ final class SettingsWindowController {
          signOut: @escaping (String) -> Void,
          signIn: @escaping (String) -> Bool,
          switchAccount: @escaping (String) -> Bool,
-         retry: @escaping (String) -> Void) {
+         retry: @escaping (String) -> Void,
+         addAccount: @escaping (String) -> Void = { _ in },
+         selectAccount: @escaping (String, String) -> Void = { _, _ in },
+         removeAccount: @escaping (String, String) -> Void = { _, _ in }) {
         self.switchAccount = switchAccount
         self.retry = retry
+        self.addAccount = addAccount
+        self.selectAccount = selectAccount
+        self.removeAccount = removeAccount
         self.updater = updater
         self.preferences = preferences
         self.providers = providers
@@ -72,6 +81,9 @@ final class SettingsWindowController {
                                    signIn: signIn,
                                    switchAccount: switchAccount,
                                    retry: retry,
+                                   addAccount: addAccount,
+                                   selectAccount: selectAccount,
+                                   removeAccount: removeAccount,
                                    updater: updater)
         )
         window.center()

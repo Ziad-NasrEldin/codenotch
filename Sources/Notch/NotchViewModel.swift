@@ -252,7 +252,10 @@ final class NotchViewModel: ObservableObject {
     /// A provider with no activity source gets none, rather than borrowing
     /// somebody else's.
     func activity(for providerID: String) -> ActivitySummary? {
-        ActivitySummary(sessions: sessions[providerID] ?? [])
+        if snapshots.first(where: { $0.id == providerID })?.showsActivity == false {
+            return nil
+        }
+        return ActivitySummary(sessions: sessions[providerID] ?? [])
     }
 
     var hoveredSnapshot: ProviderSnapshot? {

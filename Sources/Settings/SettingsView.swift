@@ -19,7 +19,11 @@ struct SettingsView: View {
     /// Re-reads a provider's credential. For a declined keychain prompt that is
     /// the whole remedy: asking again is what puts the prompt back on screen.
     let retry: (String) -> Void
+    var addAccount: (String) -> Void = { _ in }
+    var selectAccount: (String, String) -> Void = { _, _ in }
+    var removeAccount: (String, String) -> Void = { _, _ in }
     @ObservedObject var updater: Updater
+    @State private var waitingForLogin: String?
 
     var body: some View {
         // One page of grouped sections rather than tabs. Tabs hid three
@@ -34,16 +38,24 @@ struct SettingsView: View {
                 ForEach(accounts) {
                     AccountRow(provider: $0, preferences: preferences,
                                signOut: signOut, signIn: signIn,
-                               switchAccount: switchAccount, retry: retry)
+                               switchAccount: switchAccount, retry: retry,
+                               addAccount: { id in
+                                   waitingForLogin = id
+                                   addAccount(id)
+                               },
+                               selectAccount: selectAccount,
+                               removeAccount: removeAccount,
+                               waitingForLogin: waitingForLogin == $0.id)
                 }
                 // Beside the switches it explains, not stranded at the end of
                 // the page.
-                Text("Codenotch never signs in — each reading is borrowed from the "
-                     + "tool that already holds the account. Signing out here stops "
-                     + "the credential being read and forgets the numbers, but leaves "
-                     + "you signed in to that tool. macOS asks once per tool the "
-                     + "first time, and again whenever you sign in to a different "
-                     + "account; Always Allow keeps it quiet.")
+                Text("The first login is still borrowed from the tool that holds "
+                     + "it. Extra logins are signed in here for every provider and "
+                     + "stored only in Codenotch — switching them never writes the "
+                     + "other app's login. Signing out here stops the credential "
+                     + "being read and forgets the numbers, but leaves you signed "
+                     + "in to that tool. macOS asks once per tool the first time; "
+                     + "Always Allow keeps it quiet.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -54,6 +66,16 @@ struct SettingsView: View {
             // read as three unrelated settings, and "Where Codenotch appears"
             // was a header long enough to look like a warning.
             Section("Appearance") {
+                Picker("Theme", selection: $preferences.appearance) {
+                    ForEach(AppearancePreference.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+
+                Text(preferences.appearance.explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 Picker("Show", selection: $preferences.notchVisibility) {
                     ForEach(NotchVisibility.allCases) { Text($0.title).tag($0) }
                 }
@@ -145,6 +167,14 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(
             for: NSWindow.didBecomeKeyNotification
         )) { _ in accounts = providers() }
+        .onReceive(NotificationCenter.default.publisher(for: .accountRosterDidChange)) { _ in
+            accounts = providers()
+            waitingForLogin = nil
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .accountLoginDidFinish)) { note in
+            if note.object as? String == waitingForLogin { waitingForLogin = nil }
+            accounts = providers()
+        }
     }
 
     private var credit: some View {
@@ -175,12 +205,12 @@ struct SettingsView: View {
     static let width: CGFloat = 500
     /// Tall enough that Startup and Updates are visible without scrolling —
     /// four account rows push everything below them a long way down.
-    static let height: CGFloat = 560
+    static let height: CGFloat = 620
 
     /// Nothing to read from anywhere. On a first launch that is the normal
     /// state, and it is the only moment the sheet has something to explain.
     private var needsSetup: Bool {
-        !accounts.isEmpty && accounts.allSatisfy { $0.account == nil }
+        !accounts.isEmpty && accounts.allSatisfy { $0.account == nil && $0.accounts.isEmpty }
     }
 
     /// Names the tools rather than saying "tools already signed in on this
@@ -239,6 +269,10 @@ private struct AccountRow: View {
     let signIn: (String) -> Bool
     let switchAccount: (String) -> Bool
     let retry: (String) -> Void
+    let addAccount: (String) -> Void
+    let selectAccount: (String, String) -> Void
+    let removeAccount: (String, String) -> Void
+    var waitingForLogin: Bool = false
 
     private var isConnected: Bool { preferences.isConnected(provider.id) }
 
@@ -309,6 +343,8 @@ private struct AccountRow: View {
         if !isConnected {
             Text("Signed out — nothing is read, and no readings are kept.")
                 .foregroundStyle(.tertiary)
+        } else if provider.canAddAccounts {
+            roster
         } else if let account = provider.account {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
@@ -346,6 +382,61 @@ private struct AccountRow: View {
                 }
 
             }
+        }
+    }
+
+    @ViewBuilder
+    private var roster: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if provider.accounts.isEmpty {
+                Text(provider.signIn.explanation)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let title = provider.signIn.actionTitle, canOpenSignIn {
+                    Button(title) { _ = signIn(provider.id) }
+                        .controlSize(.small)
+                }
+            } else {
+                ForEach(provider.accounts) { entry in
+                    HStack(spacing: 8) {
+                        Button {
+                            selectAccount(provider.id, entry.id)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: entry.isActive
+                                      ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(entry.isActive ? .primary : .tertiary)
+                                Text(entry.summary)
+                                    .foregroundStyle(entry.isActive ? .secondary : .tertiary)
+                                    .textSelection(.enabled)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help(entry.isActive
+                              ? "This is the account the notch is reading."
+                              : "Read this account in the notch.")
+
+                        if !entry.isLive {
+                            Button("Remove") { removeAccount(provider.id, entry.id) }
+                                .buttonStyle(.link)
+                                .help("Forgets this Codenotch login. \(provider.name) itself is unchanged.")
+                        }
+                    }
+                }
+            }
+
+            Button(waitingForLogin ? "Waiting for browser…" : "Add account…") {
+                addAccount(provider.id)
+            }
+            .buttonStyle(.link)
+            .disabled(waitingForLogin)
+            .help("Signs in an extra \(provider.name) account and keeps it in Codenotch. "
+                  + "The borrowed login is left alone.")
+
+            Text("Extra logins stay in Codenotch. Switching them never writes \(provider.name)'s own login.")
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

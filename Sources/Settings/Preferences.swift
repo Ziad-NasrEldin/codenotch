@@ -31,6 +31,12 @@ final class Preferences: ObservableObject {
         didSet { defaults.set(appPresence.rawValue, forKey: Keys.presence) }
     }
 
+    /// Dark, light, or follow the Mac. Dark is the default so an update does
+    /// not recolour a notch that has always been black.
+    @Published var appearance: AppearancePreference {
+        didSet { defaults.set(appearance.rawValue, forKey: Keys.appearance) }
+    }
+
     /// The version whose changes have already been shown.
     ///
     /// Written when the What's New dialogue is dismissed rather than when it
@@ -59,6 +65,7 @@ final class Preferences: ObservableObject {
         static let visibility = "notchVisibility"
         static let presence = "appPresence"
         static let edge = "notchEdge"
+        static let appearance = "appearance"
         static let lastSeenVersion = "lastSeenVersion"
     }
 
@@ -113,6 +120,11 @@ final class Preferences: ObservableObject {
         // side of a Mac that no system chrome claims by default.
         self.notchEdge = defaults.string(forKey: Keys.edge)
             .flatMap(NotchEdge.init(rawValue:)) ?? .right
+        // Absent means never chosen. Dark is what every earlier build drew, so
+        // it is also what a first launch and an upgrade both get — Light is
+        // an opt-in, not a surprise.
+        self.appearance = defaults.string(forKey: Keys.appearance)
+            .flatMap(AppearancePreference.init(rawValue:)) ?? .dark
         // Absent means nothing has been shown yet, which is true of a fresh
         // install — so the current release reads as new to it.
         self.lastSeenVersion = defaults.string(forKey: Keys.lastSeenVersion)
@@ -147,6 +159,7 @@ final class Preferences: ObservableObject {
         let bundleID = Bundle.main.bundleIdentifier ?? "com.vinz.codenotch"
         UserDefaults.standard.removePersistentDomain(forName: bundleID)
         UserDefaults.standard.synchronize()
+        AccountVault.shared.clear()
 
         let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
         for relative in ["Caches/\(bundleID)",

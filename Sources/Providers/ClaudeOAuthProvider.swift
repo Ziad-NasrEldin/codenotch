@@ -18,6 +18,7 @@ actor ClaudeOAuthProvider: UsageProvider {
     nonisolated let glyph = ProviderGlyph.claude
     /// This profile's token, behind its own cache — see `ClaudeKeychain`.
     nonisolated private let keychain: ClaudeKeychain
+    nonisolated private let vault: AccountVault
 
     private let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private let session: URLSession
@@ -42,6 +43,7 @@ actor ClaudeOAuthProvider: UsageProvider {
     init(profile: ClaudeProfile = .default(),
          session: URLSession = .shared,
          archive: UsageArchive = UsageArchive(),
+         vault: AccountVault = .shared,
          loadCredentials: (@Sendable () throws -> ClaudeCredentials)? = nil) {
         self.profile = profile
         self.id = profile.id
@@ -51,6 +53,7 @@ actor ClaudeOAuthProvider: UsageProvider {
         self.loadCredentials = loadCredentials ?? { try keychain.load() }
         self.session = session
         self.archive = archive
+        self.vault = vault
         // Pick the back-off back up where the last run left it, so relaunching
         // during a penalty does not spend an attempt extending it.
         self.retryNoEarlierThan = archive.loadBackoffUntil(providerID: profile.id)
@@ -63,11 +66,15 @@ actor ClaudeOAuthProvider: UsageProvider {
             throw UsageProviderError.rateLimited(retryAfter: remaining)
         }
         do {
-            let snapshot = try await fetch(retryingOnUnauthorized: true)
+            let extra = vault.activeSaved(for: id)
+                ?? vault.resolvedSaved(for: id, hasLive: liveAccount() != nil)
+            let snapshot = extra != nil
+                ? try await savedReading(extra!)
+                : try await fetch(retryingOnUnauthorized: true)
             retryNoEarlierThan = nil
             consecutiveRateLimits = 0
             archive.saveBackoffUntil(nil, providerID: id)
-            return snapshot
+            return decorate(snapshot, extra: extra != nil)
         } catch UsageProviderError.needsAuth {
             // The held copy goes, so the next tick re-reads. Backing off is
             // `CredentialCache`'s job and it already does it correctly: it
@@ -92,9 +99,37 @@ actor ClaudeOAuthProvider: UsageProvider {
         }
     }
 
-    private func fetch(retryingOnUnauthorized: Bool) async throws -> ProviderSnapshot {
-        let token = try currentToken()
+    /// A Codenotch-held extra login. 401 refreshes *our* token and never
+    /// touches Claude Code's keychain item.
+    private func savedReading(_ account: SavedAccount) async throws -> ProviderSnapshot {
+        var current = account
+        do {
+            current = try await ClaudeOAuth.fresh(current, session: session)
+        } catch {
+            if current.isExpired { throw UsageProviderError.credentialExpired }
+        }
+        if current != account { vault.update(current, provider: id) }
 
+        do {
+            return try await fetch(token: current.accessToken, forgetLiveOnUnauthorized: false,
+                                   retryingOnUnauthorized: false)
+        } catch UsageProviderError.needsAuth {
+            let refreshed = try await ClaudeOAuth.refresh(current, session: session)
+            vault.update(refreshed, provider: id)
+            return try await fetch(token: refreshed.accessToken, forgetLiveOnUnauthorized: false,
+                                   retryingOnUnauthorized: false)
+        }
+    }
+
+    private func fetch(retryingOnUnauthorized: Bool) async throws -> ProviderSnapshot {
+        try await fetch(token: try currentToken(),
+                        forgetLiveOnUnauthorized: true,
+                        retryingOnUnauthorized: retryingOnUnauthorized)
+    }
+
+    private func fetch(token: String,
+                       forgetLiveOnUnauthorized: Bool,
+                       retryingOnUnauthorized: Bool) async throws -> ProviderSnapshot {
         var request = URLRequest(url: endpoint)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
@@ -106,14 +141,16 @@ actor ClaudeOAuthProvider: UsageProvider {
         Log.usage.debug("usage endpoint answered \(status)")
 
         if status == 401 || status == 403 {
-            // Rejected but unexpired: the held copy is wrong, which is what
-            // signing into a different account looks like from here.
-            keychain.forgetCached()
-            // The cached token went stale mid-flight; re-read once in case
-            // Claude Code has refreshed it since.
-            credentials = nil
-            if retryingOnUnauthorized {
-                return try await fetch(retryingOnUnauthorized: false)
+            if forgetLiveOnUnauthorized {
+                // Rejected but unexpired: the held copy is wrong, which is what
+                // signing into a different account looks like from here.
+                keychain.forgetCached()
+                // The cached token went stale mid-flight; re-read once in case
+                // Claude Code has refreshed it since.
+                credentials = nil
+                if retryingOnUnauthorized {
+                    return try await fetch(retryingOnUnauthorized: false)
+                }
             }
             throw UsageProviderError.needsAuth
         }
@@ -139,6 +176,10 @@ actor ClaudeOAuthProvider: UsageProvider {
             windows: payload.limitWindows(),
             headlineID: "session"
         )
+    }
+
+    private func decorate(_ snapshot: ProviderSnapshot, extra: Bool) -> ProviderSnapshot {
+        snapshot.labeled(from: account(), showsActivity: !extra)
     }
 
     private func currentToken() throws -> String {
@@ -205,7 +246,7 @@ actor ClaudeOAuthProvider: UsageProvider {
 
     nonisolated func forgetCachedCredential() { keychain.forgetCached() }
 
-    nonisolated func account() -> ProviderAccount? {
+    nonisolated func liveAccount() -> ProviderAccount? {
         guard let credentials = try? keychain.load() else { return nil }
         return ProviderAccount(
             label: nil,   // the credential carries no address
@@ -213,6 +254,17 @@ actor ClaudeOAuthProvider: UsageProvider {
             source: profile.sourceName,
             manageURL: URL(string: "https://claude.ai/settings/usage")
         )
+    }
+
+    nonisolated func account() -> ProviderAccount? {
+        if let saved = vault.activeSaved(for: id) {
+            return saved.asProviderAccount(manageURL: URL(string: "https://claude.ai/settings/usage"))
+        }
+        let live = liveAccount()
+        if live == nil, let fallback = vault.resolvedSaved(for: id, hasLive: false) {
+            return fallback.asProviderAccount(manageURL: URL(string: "https://claude.ai/settings/usage"))
+        }
+        return live
     }
 
     private static let decoder: JSONDecoder = {

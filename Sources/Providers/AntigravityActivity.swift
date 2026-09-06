@@ -17,8 +17,19 @@ struct AntigravityActivity: Equatable {
     let lastRequest: Date?
 
     static var transcriptRoot: URL {
-        URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".gemini/antigravity/brain")
+        transcriptRoots[0]
+    }
+
+    /// The older Electron app, the VS Code-fork IDE, and the CLI each keep
+    /// their own brain directory. Counting only the first is how a Mac that
+    /// actually uses the IDE reports zero requests.
+    static var transcriptRoots: [URL] {
+        let home = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".gemini")
+        return [
+            home.appendingPathComponent("antigravity/brain"),
+            home.appendingPathComponent("antigravity-ide/brain"),
+            home.appendingPathComponent("antigravity-cli/brain")
+        ]
     }
 
     /// A step the model actually answered. User input and system checkpoints
@@ -26,7 +37,28 @@ struct AntigravityActivity: Equatable {
     /// work the model never did.
     private static let modelSource = "MODEL"
 
-    static func read(root: URL = transcriptRoot, now: Date = Date()) -> AntigravityActivity {
+    static func read(now: Date = Date()) -> AntigravityActivity {
+        read(roots: transcriptRoots, now: now)
+    }
+
+    static func read(root: URL, now: Date = Date()) -> AntigravityActivity {
+        read(roots: [root], now: now)
+    }
+
+    static func read(roots: [URL], now: Date = Date()) -> AntigravityActivity {
+        var today = 0
+        var latest: Date?
+        for root in roots {
+            let part = readOne(root: root, now: now)
+            today += part.requestsToday
+            if let last = part.lastRequest, latest == nil || last > latest! {
+                latest = last
+            }
+        }
+        return AntigravityActivity(requestsToday: today, lastRequest: latest)
+    }
+
+    private static func readOne(root: URL, now: Date) -> AntigravityActivity {
         let manager = FileManager.default
         guard let trajectories = try? manager.contentsOfDirectory(
             at: root, includingPropertiesForKeys: nil

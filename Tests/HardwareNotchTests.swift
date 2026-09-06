@@ -465,7 +465,7 @@ final class HardwareClearanceTests: XCTestCase {
     /// deeper, rather than pushed past the band that made it deeper. They ended
     /// up 19pt from the top instead of 38, so the top of every ring was inside
     /// the hole — which is what "the notch is blocking the rings" looks like.
-    func testTheHardwaresBandHoldsNothingButBlack() {
+    func testTheHardwaresBandHoldsNothingButTheNotchBody() {
         let m = model()
         let size = m.notchSize
         let renderer = ImageRenderer(
@@ -477,16 +477,23 @@ final class HardwareClearanceTests: XCTestCase {
         else { return XCTFail("nothing rendered") }
         let bitmap = NSBitmapImageRep(cgImage: rep)
 
+        // The hole is behind the camera housing, so it may only hold the notch
+        // body — rings, tracks and labels have a colour of their own. The body
+        // itself follows the theme, which is why this is not a blackness test.
+        let fill = Palette.resolve(Palette.notch, in: NSApp.effectiveAppearance)
+
         let place = NotchPlacement(edge: .top, panelSize: m.panelSize)
         for across in stride(from: CGFloat(1), to: realNotch.height, by: 2) {
             for along in stride(from: CGFloat(0), to: size.width, by: 3) {
                 let point = place.point(along: m.slack + along, across: across)
                 guard let colour = bitmap.colorAt(x: Int(point.x), y: Int(point.y)),
                       colour.alphaComponent > 0.5 else { continue }
-                // Black is the notch itself. Anything else is a ring, a track
-                // or a label drawn where the display has a hole in it.
+                let sampled = colour.usingColorSpace(.sRGB) ?? colour
+                let dr = sampled.redComponent - fill.redComponent
+                let dg = sampled.greenComponent - fill.greenComponent
+                let db = sampled.blueComponent - fill.blueComponent
                 XCTAssertLessThan(
-                    colour.brightnessComponent, 0.05,
+                    sqrt(dr * dr + dg * dg + db * db), 0.2,
                     "something is drawn inside the hardware notch at (\(along), \(across))"
                 )
             }

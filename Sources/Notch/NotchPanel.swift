@@ -11,7 +11,7 @@ final class NotchPanel: NSPanel {
     var contextMenuProvider: (() -> NSMenu?)?
     /// A left click on the visible chrome. Handled here for the same reason the
     /// menu is: the hit test lands on a SwiftUI subview that may consume it.
-    var onClick: (() -> Void)?
+    var onClick: ((Int) -> Void)?
 
     override func sendEvent(_ event: NSEvent) {
         guard event.type == .rightMouseDown,
@@ -28,7 +28,7 @@ final class NotchPanel: NSPanel {
         guard let view = contentView, view.hitTest(event.locationInWindow) != nil else {
             return super.mouseDown(with: event)
         }
-        onClick?()
+        onClick?(event.clickCount)
     }
 
     init(contentRect: NSRect) {

@@ -14,12 +14,17 @@ import Foundation
 ///     "onDemand": { "enabled": false, "used": 0, "limit": null } } }
 /// ```
 ///
-/// Cursor meters an **allowance, not a request count** — the dashboard's "Your
-/// included usage · N% used" is `totalPercentUsed`. The `used`/`limit` pair sits
-/// at zero on a free plan even while real usage is happening, because the
-/// allowance arrives as `breakdown.bonus` rather than as a dollar limit. Reading
-/// `used`/`limit` therefore reports 0% for an account that is 10% through its
-/// month, which is exactly what this parser used to do.
+/// Cursor meters an **allowance, not a request count**. Since mid-2026 the
+/// dashboard splits that allowance into two pools: **Cursor models** (Auto +
+/// Composer, `autoPercentUsed`) and named / third-party models
+/// (`apiPercentUsed`). The blended `totalPercentUsed` is the old "included
+/// usage" headline — a number that does not name either pool — so this parser
+/// does not surface it.
+///
+/// The `used`/`limit` pair sits at zero on a free plan even while real usage
+/// is happening, because the allowance arrives as `breakdown.bonus` rather
+/// than as a dollar limit. Reading those reported 0% for an account that was
+/// 10% through its month, which is exactly what this parser used to do.
 enum CursorUsage {
     static func windows(fromJSON json: String) throws -> [LimitWindow] {
         guard let data = json.data(using: .utf8),
@@ -32,20 +37,20 @@ enum CursorUsage {
 
         var windows: [LimitWindow] = []
 
-        // The headline, and the one the dashboard shows.
+        // The headline: Auto + Composer, the pool the dashboard now leads with.
         //
         // Zero is a reading, not an absence. A free plan reports
-        // `totalPercentUsed: 0` beside `limit: 0`, and it is tempting to read
+        // `autoPercentUsed: 0` beside `limit: 0`, and it is tempting to read
         // that as "no allowance to be a percentage of" — but Cursor itself
-        // ships the answer in the same response:
-        // "You've used 0% of your included total usage". If Cursor calls it 0%,
-        // so does this. Suppressing it hid a correct reading from an account
+        // ships the answer in the same response. If Cursor calls it 0%, so
+        // does this. Suppressing it hid a correct reading from an account
         // that had genuinely just been switched.
-        if let total = percent(plan["totalPercentUsed"]) {
-            windows.append(LimitWindow(id: "included", label: "Included usage",
-                                       usedFraction: total, resetsAt: resetsAt))
+        if let auto = percent(plan["autoPercentUsed"]) {
+            windows.append(LimitWindow(id: "cursor_models", label: "Cursor models",
+                                       usedFraction: auto, resetsAt: resetsAt))
         }
-        // Reported separately by Cursor, and can be far ahead of the total.
+        // Named / third-party models. Reported separately, and can be far
+        // ahead of the Cursor-models pool.
         if let api = percent(plan["apiPercentUsed"]), api > 0 {
             windows.append(LimitWindow(id: "api", label: "API usage",
                                        usedFraction: api, resetsAt: resetsAt))
@@ -62,6 +67,41 @@ enum CursorUsage {
             throw UsageProviderError.nothingMetered("Unlimited on the \(membership) plan — nothing to meter")
         }
         throw UsageProviderError.nothingMetered("The \(membership) plan has nothing for Cursor to meter yet")
+    }
+
+    /// Deep Control tokens sometimes answer with `planUsage` instead of
+    /// `individualUsage.plan`. Same two pools, different envelope.
+    static func windows(fromPeriodJSON json: String) throws -> [LimitWindow] {
+        guard let data = json.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { throw UsageProviderError.badResponse(status: 0) }
+
+        let plan = (root["planUsage"] as? [String: Any])
+            ?? (root["plan"] as? [String: Any])
+            ?? [:]
+        let resetsAt = date(root["billingCycleEnd"])
+            ?? date(plan["billingCycleEnd"])
+            ?? date(root["periodEnd"])
+
+        var windows: [LimitWindow] = []
+        if let auto = percent(plan["autoPercentUsed"]) {
+            windows.append(LimitWindow(id: "cursor_models", label: "Cursor models",
+                                       usedFraction: auto, resetsAt: resetsAt))
+        }
+        if let api = percent(plan["apiPercentUsed"]), api > 0 {
+            windows.append(LimitWindow(id: "api", label: "API usage",
+                                       usedFraction: api, resetsAt: resetsAt))
+        }
+        guard !windows.isEmpty else {
+            throw UsageProviderError.nothingMetered("Cursor reported no usage windows")
+        }
+        return windows
+    }
+
+    /// Summary shape first; period envelope if that is what arrived.
+    static func windows(fromAnyJSON json: String) throws -> [LimitWindow] {
+        if let windows = try? windows(fromJSON: json), !windows.isEmpty { return windows }
+        return try windows(fromPeriodJSON: json)
     }
 
     /// A dollar-denominated bucket, used where a plan states a real ceiling.

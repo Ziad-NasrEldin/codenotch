@@ -66,7 +66,7 @@ struct SettingsOrb: View {
             Circle()
                 .trim(from: restingTrim.lowerBound, to: restingTrim.upperBound)
                 .stroke(
-                    Palette.notch,
+                    Palette.chrome,
                     style: StrokeStyle(lineWidth: NotchLayout.orbStroke, lineCap: .round)
                 )
                 .frame(width: arcRadius * 2, height: arcRadius * 2)
@@ -76,6 +76,7 @@ struct SettingsOrb: View {
 
             Circle()
                 .fill(Palette.notch)
+                .overlay { Circle().strokeBorder(Palette.notchRim, lineWidth: 1) }
                 .frame(width: NotchLayout.orbDiameter, height: NotchLayout.orbDiameter)
                 .opacity(isHovered ? 1 : 0)
                 .scaleEffect(isHovered ? 1 : 1.1)

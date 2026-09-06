@@ -91,6 +91,8 @@ extension UsageProvider {
     /// is declaring a method only in an extension that quietly breaks.
     func account() -> ProviderAccount? { nil }
 
+    func liveAccount() -> ProviderAccount? { account() }
+
     var signInRoute: SignInRoute {
         .guidance("Sign in with the tool that owns this account.")
     }
@@ -129,4 +131,8 @@ struct ProviderSummary: Identifiable, Equatable {
     /// cure for an illness the provider does not have, and a button that does
     /// nothing is indistinguishable from a broken one.
     var wasRefusedAccess: Bool = false
+    /// Live plus every extra Codenotch-held login, when this provider has a
+    /// roster. Empty for everyone else.
+    var accounts: [AccountEntry] = []
+    var canAddAccounts: Bool = false
 }

@@ -56,6 +56,90 @@ final class AntigravityCredentialsTests: XCTestCase {
     func testGarbageIsRejectedRatherThanCrashing() {
         XCTAssertNil(AntigravityCredentials.decode(Data("not base64 at all".utf8)))
     }
+
+    func testItKeepsTheRefreshTokenFromJSON() throws {
+        let creds = try XCTUnwrap(AntigravityCredentials.decode(stored(payload)))
+        XCTAssertEqual(creds.refreshToken, "r")
+        XCTAssertEqual(creds.source, "Antigravity")
+    }
+
+    /// The file fallback is raw JSON, not the go-keyring envelope. Treating it
+    /// as base64 is how a perfectly good token reads as missing.
+    func testRawJSONFileStillDecodes() throws {
+        let creds = try XCTUnwrap(AntigravityCredentials.decodeJSON(
+            Data(payload.utf8), source: "Antigravity"
+        ))
+        XCTAssertEqual(creds.accessToken, "ya29.token")
+    }
+
+    /// A plus in a form body is a space. Encoding a refresh token with
+    /// `urlQueryAllowed` would change the secret.
+    func testFormBodyEncodesPlus() {
+        let body = String(data: AntigravityCredentials.formBody(["refresh_token": "a+b"]),
+                          encoding: .utf8)
+        XCTAssertEqual(body, "refresh_token=a%2Bb")
+    }
+}
+
+/// Antigravity IDE keeps the token in `state.vscdb` as a protobuf map, not
+/// in the keychain. If this decoder drifts, "Allow access…" reads the old
+/// Electron app's expired keychain item and appears to do nothing.
+final class AntigravityIDETokenTests: XCTestCase {
+    func testItReadsTheAccessAndRefreshTokens() throws {
+        let expiry = Date(timeIntervalSince1970: 1_893_456_000) // 2030-01-01
+        let stored = Self.sqliteValue(access: "ya29.ide",
+                                      refresh: "1//refresh",
+                                      expiry: expiry)
+        let creds = try XCTUnwrap(AntigravityCredentials.decodeIDEToken(stored))
+        XCTAssertEqual(creds.accessToken, "ya29.ide")
+        XCTAssertEqual(creds.refreshToken, "1//refresh")
+        XCTAssertEqual(creds.source, "Antigravity IDE")
+        XCTAssertEqual(creds.expiresAt.timeIntervalSince1970, expiry.timeIntervalSince1970,
+                       accuracy: 1)
+        XCTAssertFalse(creds.isExpired)
+    }
+
+    func testAnUnfamiliarMapYieldsNothing() {
+        XCTAssertNil(AntigravityCredentials.decodeIDEToken(Data("not a token".utf8)))
+        XCTAssertNil(AntigravityCredentials.decodeIDEProtobuf(Data([0x00, 0x01, 0x02])))
+    }
+
+    /// The sqlite column is the base64 of the map, matching a real IDE row.
+    private static func sqliteValue(access: String, refresh: String, expiry: Date) -> Data {
+        let seconds = UInt64(expiry.timeIntervalSince1970)
+        let timestamp = protoVarintField(1, seconds)
+        let info = protoString(1, access)
+            + protoString(2, "Bearer")
+            + protoString(3, refresh)
+            + protoBytes(4, timestamp)
+        let wrapper = protoString(1, info.base64EncodedString())
+        let entry = protoString(1, "oauthTokenInfoSentinelKey") + protoBytes(2, wrapper)
+        let map = protoBytes(1, entry)
+        return Data(map.base64EncodedString().utf8)
+    }
+
+    private static func protoVarint(_ value: UInt64) -> Data {
+        var v = value
+        var out = Data()
+        while v > 0x7f {
+            out.append(UInt8(v & 0x7f | 0x80))
+            v >>= 7
+        }
+        out.append(UInt8(v))
+        return out
+    }
+
+    private static func protoVarintField(_ field: Int, _ value: UInt64) -> Data {
+        protoVarint(UInt64(field << 3)) + protoVarint(value)
+    }
+
+    private static func protoBytes(_ field: Int, _ bytes: Data) -> Data {
+        protoVarint(UInt64(field << 3 | 2)) + protoVarint(UInt64(bytes.count)) + bytes
+    }
+
+    private static func protoString(_ field: Int, _ value: String) -> Data {
+        protoBytes(field, Data(value.utf8))
+    }
 }
 
 final class AntigravityTierTests: XCTestCase {
@@ -185,6 +269,31 @@ final class AntigravityActivityTests: XCTestCase {
         XCTAssertEqual(AntigravityActivity(requestsToday: 0, lastRequest: nil).summary,
                        "no requests today")
     }
+
+    /// The IDE writes a different brain directory. Counting only the Electron
+    /// app's folder is how a Mac that actually uses the IDE reports zero.
+    func testItAddsUpAcrossProductFolders() throws {
+        let a = root.appendingPathComponent("electron")
+        let b = root.appendingPathComponent("ide")
+        try write([step("2026-08-31T09:00:00Z", source: "MODEL")], trajectory: "t")
+        // `write` lands under `root`; copy the same layout into two product folders.
+        let first = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .first { $0.lastPathComponent != "electron" && $0.lastPathComponent != "ide" }
+        XCTAssertNotNil(first)
+        try FileManager.default.createDirectory(at: a, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: b, withIntermediateDirectories: true)
+        // Two separate transcripts, one per product.
+        let writeInto: (URL, String) throws -> Void = { dest, name in
+            let dir = dest.appendingPathComponent("\(name)/.system_generated/logs")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try self.step("2026-08-31T09:00:00Z", source: "MODEL")
+                .write(to: dir.appendingPathComponent("transcript.jsonl"),
+                       atomically: true, encoding: .utf8)
+        }
+        try writeInto(a, "one")
+        try writeInto(b, "two")
+        XCTAssertEqual(AntigravityActivity.read(roots: [a, b], now: noon).requestsToday, 2)
+    }
 }
 
 /// The quota parser is written from message names in Antigravity's binary, not
@@ -193,30 +302,23 @@ final class AntigravityActivityTests: XCTestCase {
 /// recognise must yield nothing and send the provider to the honest fallback,
 /// never a confident ring built on a guess.
 final class AntigravityQuotaTests: XCTestCase {
-    func testItReadsBucketsIntoWindows() {
+    func testItReadsRemainingFractionBucketsIntoWindows() {
         let body = Data("""
-        {"quotaGroups":[{"displayName":"Gemini","buckets":[
-          {"name":"daily","displayName":"Daily","used":250,"limit":1000,
+        {"groups":[{"buckets":[
+          {"bucketId":"gemini-weekly","remainingFraction":0.75,
            "resetTime":"2026-09-01T00:00:00Z"}]}]}
         """.utf8)
         let windows = AntigravityProvider.windows(in: body)
         XCTAssertEqual(windows.count, 1)
         XCTAssertEqual(windows.first?.usedFraction ?? 0, 0.25, accuracy: 0.0001)
-        XCTAssertEqual(windows.first?.label, "Daily")
-    }
-
-    /// Cursor's free plan reports an included limit of zero, and dividing by it
-    /// produced a confident 0% for an account well into its month. Nothing with
-    /// a zero limit is ever a percentage.
-    func testAZeroLimitIsDroppedRatherThanDividedBy() {
-        let body = Data(#"{"buckets":[{"name":"x","used":0,"limit":0}]}"#.utf8)
-        XCTAssertTrue(AntigravityProvider.windows(in: body).isEmpty)
+        XCTAssertEqual(windows.first?.label, "Weekly")
+        XCTAssertEqual(windows.first?.id, "gemini-weekly")
     }
 
     func testNonsenseValuesAreDropped() {
-        let wild = Data(#"{"buckets":[{"name":"x","used":9999,"limit":10}]}"#.utf8)
+        let wild = Data(#"{"groups":[{"buckets":[{"bucketId":"gemini-weekly","remainingFraction":1.4}]}]}"#.utf8)
         XCTAssertTrue(AntigravityProvider.windows(in: wild).isEmpty)
-        let negative = Data(#"{"buckets":[{"name":"x","used":-5,"limit":10}]}"#.utf8)
+        let negative = Data(#"{"groups":[{"buckets":[{"bucketId":"gemini-weekly","remainingFraction":-0.2}]}]}"#.utf8)
         XCTAssertTrue(AntigravityProvider.windows(in: negative).isEmpty)
     }
 
@@ -228,8 +330,9 @@ final class AntigravityQuotaTests: XCTestCase {
     }
 
     func testAMissingResetIsToleratedRatherThanFatal() {
-        let body = Data(#"{"buckets":[{"name":"d","used":1,"limit":4}]}"#.utf8)
+        let body = Data(#"{"groups":[{"buckets":[{"bucketId":"gemini-weekly","remainingFraction":0.75}]}]}"#.utf8)
         XCTAssertEqual(AntigravityProvider.windows(in: body).count, 1)
+        XCTAssertNil(AntigravityProvider.windows(in: body).first?.resetsAt)
     }
 }
 
@@ -298,7 +401,27 @@ final class AntigravityBridgeTests: XCTestCase {
         XCTAssertEqual(windows.count, 2)
         XCTAssertEqual(windows[0].id, "gemini-weekly")
         XCTAssertEqual(windows[0].usedFraction ?? 0, 1 - 0.96262, accuracy: 0.00001)
-        XCTAssertEqual(windows[0].label, "Gemini Models")
+        XCTAssertEqual(windows[0].label, "Weekly")
+    }
+
+    /// Cloud Code returns the groups bare, without the language-server
+    /// `response` wrapper. Parsing only the wrapper is how a live weekly
+    /// fraction became a request count on the notch.
+    func testABareCloudCodePayloadStillParses() {
+        let bare = Data("""
+        {"groups":[{"displayName":"Gemini Models","buckets":[
+          {"bucketId":"gemini-weekly","displayName":"Weekly Limit Remaining",
+           "remainingFraction":0.92556536,"resetTime":"2026-09-07T14:12:34Z"},
+          {"bucketId":"gemini-5h","remainingFraction":0.9104747},
+          {"bucketId":"3p-weekly","remainingFraction":1},
+          {"bucketId":"3p-5h","remainingFraction":1}]}]}
+        """.utf8)
+        let windows = AntigravityBridge.windows(in: bare)
+        XCTAssertEqual(windows.map(\.id), ["gemini-weekly", "gemini-5h", "3p-weekly", "3p-5h"])
+        XCTAssertEqual(windows.map(\.label), ["Weekly", "Session", "Claude Weekly", "Claude"])
+        XCTAssertEqual(windows[0].usedFraction ?? 0, 1 - 0.92556536, accuracy: 0.00001)
+        XCTAssertEqual(windows[1].usedFraction ?? 0, 1 - 0.9104747, accuracy: 0.00001)
+        XCTAssertEqual(windows[2].usedFraction, 0)
     }
 
     /// A full bucket is 0% used, not "no reading".
@@ -913,6 +1036,7 @@ final class KeychainProviderTests: XCTestCase {
         XCTAssertTrue(summary("gemini").usesKeychain)
         XCTAssertFalse(summary("cursor").usesKeychain, "Cursor reads a file, not the keychain")
         XCTAssertFalse(summary("codex").usesKeychain, "Codex reads a file, not the keychain")
+        XCTAssertFalse(summary("grok").usesKeychain, "Grok reads ~/.grok/auth.json, not the keychain")
     }
 }
 

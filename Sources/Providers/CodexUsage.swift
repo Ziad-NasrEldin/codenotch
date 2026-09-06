@@ -114,6 +114,56 @@ enum CodexUsage {
         )
     }
 
+    /// Windows from ChatGPT's `backend-api/wham/usage` — the live figure for a
+    /// Codenotch-held extra account, which has no rollout and no app server.
+    ///
+    /// Same ids as the rollout (`primary` / `secondary`) so the ring's
+    /// `headlineID` still means the same thing whichever source answered.
+    static func windows(fromWHAM data: Data, now: Date = Date()) -> [LimitWindow] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rate = root["rate_limit"] as? [String: Any]
+        else { return [] }
+
+        return [
+            window(whamBucket(rate["primary_window"]), id: "primary", now: now),
+            window(whamBucket(rate["secondary_window"]), id: "secondary", now: now),
+            window(whamBucket(rate["tertiary_window"]), id: "tertiary", now: now)
+        ].compactMap { $0 }
+    }
+
+    static func plan(fromWHAM data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let plan = (root["plan_type"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !plan.isEmpty
+        else { return nil }
+        return plan
+    }
+
+    static func email(fromWHAM data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let email = (root["email"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !email.isEmpty
+        else { return nil }
+        return email
+    }
+
+    /// WHAM names the fields differently from the rollout (`used_percent` vs
+    /// that same name, but `reset_at` and `limit_window_seconds` instead of
+    /// `resets_at` / `window_minutes`). Translate so `window(_:id:now:)` can
+    /// stay the one parser.
+    private static func whamBucket(_ any: Any?) -> [String: Any]? {
+        guard let bucket = any as? [String: Any] else { return nil }
+        var translated: [String: Any] = [:]
+        if let percent = bucket["used_percent"] { translated["used_percent"] = percent }
+        if let reset = bucket["reset_at"] { translated["resets_at"] = reset }
+        if let seconds = (bucket["limit_window_seconds"] as? NSNumber)?.doubleValue {
+            translated["window_minutes"] = seconds / 60
+        }
+        return translated
+    }
+
     /// Codex names its windows only by length, so the label is derived from it —
     /// "5h limit" says more than "primary".
     static func label(windowMinutes: Double?, fallback: String) -> String {

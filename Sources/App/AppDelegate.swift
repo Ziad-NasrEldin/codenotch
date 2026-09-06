@@ -43,6 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `CODENOTCH_DEMO=1` puts the design frame's three providers on screen
         // with its numbers, for screenshots and for eyeballing the layout.
         if ProcessInfo.processInfo.environment["CODENOTCH_DEMO"] == "1" {
+            // The design frame is dark. Demo is for screenshots of that frame,
+            // so it does not follow a light Mac.
+            NSApp.appearance = NSAppearance(named: .darkAqua)
             controller.model.snapshots = Fixtures.snapshots()
         } else {
             // Nothing needs a browser session at the moment. `WebSessionProvider`
@@ -69,8 +72,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.usage.info("claude profiles: \(self.claudeProfiles.map(\.displayPath).joined(separator: ", "), privacy: .public)")
             let store = UsageStore(
                 providers: claudeProfiles.map { ClaudeOAuthProvider(profile: $0) }
-                    + [CursorLocalProvider(), CodexLocalProvider(), AntigravityProvider(),
-                       GLMProvider()]
+                    + [CursorLocalProvider(), CodexLocalProvider(), GrokProvider(),
+                       AntigravityProvider(), GLMProvider()]
                     + webProviders,
                 disconnected: preferences.disconnectedProviders
             )
@@ -81,6 +84,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // this, every launch on any other edge opens with a flash of the
             // right-hand one and then crossfades away from it.
             controller.model.edge = preferences.notchEdge
+            // Applied here, before the panel is put up, so a light choice does
+            // not flash black for a frame. `@Published` will not re-emit this
+            // value to the sink below.
+            NSApp.appearance = preferences.appearance.nsAppearance
 
             let updater = Updater()
             self.updater = updater
@@ -97,7 +104,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 switchAccount: { [weak store] in
                     store?.openAccountSource(providerID: $0) ?? false
                 },
-                retry: { [weak store] in store?.reauthorize(providerID: $0) }
+                retry: { [weak store] in store?.reauthorize(providerID: $0) },
+                addAccount: { [weak store] in store?.addAccount(providerID: $0) },
+                selectAccount: { [weak store] id, account in
+                    store?.selectAccount(providerID: id, accountID: account)
+                },
+                removeAccount: { [weak store] id, account in
+                    store?.removeAccount(providerID: id, accountID: account)
+                }
             )
             controller.onOpenSettings = { [weak settings] in settings?.show() }
             self.settings = settings
@@ -110,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.whatsNew = whatsNew
 
             // An agent app has no dock icon and no window: installed and
-            // launched, it shows four empty rings on a screen edge and no
+            // launched, it shows empty rings on a screen edge and no
             // reason to look at them. Once, on the very first run, it opens the
             // one place that explains what to connect.
             //
@@ -146,6 +160,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .sink { [weak controller] in controller?.apply(edge: $0) }
                 .store(in: &cancellables)
 
+            preferences.$appearance
+                .receive(on: RunLoop.main)
+                .sink { NSApp.appearance = $0.nsAppearance }
+                .store(in: &cancellables)
+
             preferences.$disconnectedProviders
                 .receive(on: RunLoop.main)
                 .sink { [weak store] in store?.disconnected = $0 }
@@ -163,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             store.start()
             controller.onRefresh = { [weak store] in store?.refreshNow() }
             controller.onRefreshProvider = { [weak store] id in store?.refresh(providerID: id) }
+            controller.onCycleProvider = { [weak store] id in _ = store?.cycleAccount(providerID: id) }
             store.$refreshing
                 .receive(on: RunLoop.main)
                 .sink { [weak controller] ids in controller?.model.refreshing = ids }
@@ -188,6 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var monitors: [String: any AgentActivityMonitor] = [
             "cursor": CursorActivityMonitor(),
             "codex": CodexActivityMonitor(),
+            "grok": GrokActivityMonitor(),
             "gemini": AntigravityActivityMonitor()
         ]
         for profile in claudeProfiles {

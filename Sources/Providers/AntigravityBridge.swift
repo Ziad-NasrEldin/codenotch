@@ -44,7 +44,8 @@ enum AntigravityBridge {
         -> Endpoint? {
         let table = processTable ?? run("/bin/ps", ["-Ao", "pid,command"])
         guard let line = table.split(separator: "\n").first(where: {
-            $0.contains("language_server") && $0.contains("--csrf_token")
+            ($0.contains("language_server") || $0.contains("language_server_macos"))
+                && $0.contains("--csrf_token")
         }) else { return nil }
 
         guard let token = value(of: "--csrf_token", in: String(line)),
@@ -132,6 +133,11 @@ enum AntigravityBridge {
     /// The server reports what is **left**, not what is spent — the notch shows
     /// the opposite, so every fraction is inverted here rather than in the view,
     /// where it would be a percentage whose meaning depended on the provider.
+    ///
+    /// Accepts both envelopes OpenUsage documented: the language server wraps
+    /// the payload in `{"response": {"groups": …}}`, Cloud Code returns it bare
+    /// as `{"groups": …}`. Parsing only the wrapper is how a live weekly
+    /// fraction became a request count.
     static func windows(in data: Data) -> [LimitWindow] {
         struct Response: Decodable {
             struct Bucket: Decodable {
@@ -146,27 +152,45 @@ enum AntigravityBridge {
             }
             struct Body: Decodable { let groups: [Group]? }
             let response: Body?
+            let groups: [Group]?
         }
 
-        guard let decoded = try? JSONDecoder().decode(Response.self, from: data),
-              let groups = decoded.response?.groups
+        guard let decoded = try? JSONDecoder().decode(Response.self, from: data)
         else { return [] }
+        let groups = decoded.response?.groups ?? decoded.groups ?? []
 
-        return groups.flatMap { group -> [LimitWindow] in
-            (group.buckets ?? []).compactMap { bucket in
+        // Exact bucket IDs only — a future `gemini-image-5h` must not join a
+        // pool via its display name. Labels match the subscription UI.
+        let labels: [String: String] = [
+            "gemini-weekly": "Weekly",
+            "gemini-5h": "Session",
+            "3p-weekly": "Claude Weekly",
+            "3p-5h": "Claude"
+        ]
+        let order = ["gemini-weekly", "gemini-5h", "3p-weekly", "3p-5h"]
+
+        var byID: [String: LimitWindow] = [:]
+        for group in groups {
+            for bucket in group.buckets ?? [] {
                 guard let remaining = bucket.remainingFraction,
-                      remaining >= 0, remaining <= 1
-                else { return nil }
-                return LimitWindow(
-                    id: bucket.bucketId ?? group.displayName ?? "quota",
-                    // The group names the models; the bucket only ever says
-                    // "Weekly Limit Remaining", which is the same for both.
-                    label: group.displayName ?? bucket.displayName ?? "Usage",
+                      remaining >= 0, remaining <= 1,
+                      let id = bucket.bucketId, !id.isEmpty
+                else { continue }
+                byID[id] = LimitWindow(
+                    id: id,
+                    label: labels[id] ?? group.displayName ?? bucket.displayName ?? "Usage",
                     usedFraction: 1 - remaining,
                     resetsAt: bucket.resetTime.flatMap(AntigravityCredentials.parse)
                 )
             }
         }
+
+        var windows: [LimitWindow] = []
+        for id in order {
+            if let window = byID.removeValue(forKey: id) { windows.append(window) }
+        }
+        windows.append(contentsOf: byID.values)
+        return windows
     }
 
     // MARK: - Plumbing
